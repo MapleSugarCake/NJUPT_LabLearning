@@ -39,14 +39,11 @@ def finish_class(id):
     print(responses.text)
     return responses.status_code
 
-#借用学长的写法，不理解为什么我的json载荷会有几率出现acquire lock fail，换学长得就行了？
-#或许是它答题有顺序要求？
-class questinAnswer():
+class questinAnswer:
     def __init__(self, questionID , videoID , options) -> None:
         self.questionID = questionID
         self.videoID = videoID
         self.options = options
-
 
 def get_question(id):
     headers = {
@@ -66,7 +63,6 @@ def get_question(id):
                                      question['correctAnswer'] if len(question['correctAnswer']) == 1 else question[
                                          'correctAnswer'].split(',')))
     print(f"课程{id}问题获取成功")
-    #处理得到的received
     for a in res:
         solve_question(a)
 
@@ -83,13 +79,11 @@ def solve_question(ans):
     if responses.status_code == 200:
         print(responses.text)
 
-
-
 def main():
 
     types=int(input("管院等C类[5章节课程]同学请输入0，\n通信学院等B类[7章节课程]同学请输入1,\n材料学院等A类[11章节课程]同学请输入2:"))
     print(types)
-#获取课程信息ID，（纯手打，原网页好像用js刷新列表，不好爬取）不会JavaScript是我的败笔
+
     urls_1 = ["1834023741387149313","1834023916826497026","1834024290224410625","1811954032592510977","1811954369810358273",
               "1811954561884315650","1811955013145288706","1811955307090501634","1811955432076566529","1811955598116478977",
               "1811955769445408769","1811955963645878274" ]
@@ -125,6 +119,17 @@ def main():
     urls_11_C = ["1827980030299537410","1812004623993757697","1812004749810294786","1812005014382796802"]
     urls_11_A = ["1812005151045804034","1812005281945837569","1812005485759651841","1812006093640130561","1812006228558307329",
                  "1812006364332122114","1812006705882685442","1812006850334515201","1812007175351132161"]
+
+    # ========== 新增：额外课程ID（所有学院均需执行） ==========
+    extra_ids = [
+        "2069661595847548929",
+        "2069662760035344385",
+        "2069663090571665409",
+        "2069664135821582337",
+        "2069664287567306754",
+        "2047246967280680962"
+    ]
+
     url_names = {
         id(urls_1): "第一章节",
         id(urls_2): "第二章节",
@@ -138,7 +143,8 @@ def main():
         id(urls_9):"第九章节",
         id(urls_10): "第十章节",
         id(urls_11_C): "第十一章节A【前4课】",
-        id(urls_11_A):"第十一章节B【后9课】"
+        id(urls_11_A):"第十一章节B【后9课】",
+        id(extra_ids): "额外章节"   # 新增映射
     }
     # 管院1,2,3,10,11C
     # 通院123,4B,7,10,11C
@@ -146,13 +152,13 @@ def main():
     match types:
         case 0:
             print("管院等C类[5章节课程]已加载")
-            urls_lists = [urls_1, urls_2, urls_3, urls_10, urls_11_C]
+            urls_lists = [urls_1, urls_2, urls_3, urls_10, urls_11_C, extra_ids]
         case 1:
             print("通信学院等B类[7章节课程]已加载")
-            urls_lists = [urls_1, urls_2, urls_3, urls_4_B, urls_7, urls_10, urls_11_C]
+            urls_lists = [urls_1, urls_2, urls_3, urls_4_B, urls_7, urls_10, urls_11_C, extra_ids]
         case 2:
             print("材料学院等A类[11章节课程]已加载")
-            urls_lists = [urls_1, urls_2, urls_3, urls_4_B, urls_4_A,urls_5,urls_6,urls_7, urls_8,urls_9,urls_10, urls_11_C,urls_11_A]
+            urls_lists = [urls_1, urls_2, urls_3, urls_4_B, urls_4_A,urls_5,urls_6,urls_7, urls_8,urls_9,urls_10, urls_11_C,urls_11_A, extra_ids]
         case _:
             print("输入错误。")
             exit()
@@ -165,11 +171,9 @@ def main():
             threads.append(thread)
             time.sleep(0.5)
             thread.start()
-        #阻塞线程，等待当前章节完成
         for i in threads:
             i.join()
         list_name = url_names.get(id(a), "未知章节")
-        #简单检查一下是否全部完成
         if success==len(a):
             print("\n")
             print(f"{list_name}已完成学习")
@@ -178,7 +182,6 @@ def main():
             print("\n")
             print(f"{list_name}存在 {len(a)-success}个 学习失败的章节")
             print("\n")
-
 
 if __name__ == "__main__":
     print("script by MapleCake NJUPT2025管院新生")
@@ -197,7 +200,5 @@ if __name__ == "__main__":
     print("    6.选择类型为xhr的包，在请求标头里复制x-access-token的数据，并粘贴在本程序中")
     token = input("请输入你的X-Access-Token：")
     main()
-
     print("程序执行完毕，请在网页上查看完成情况。按回车键退出...")
-
     input()
