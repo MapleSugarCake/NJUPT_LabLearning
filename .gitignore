@@ -10,3 +10,5 @@ wheels/
 .idea
 .venv
 main.spec
+# build files
+*.ico
