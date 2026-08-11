@@ -3,7 +3,7 @@
 from labpass.cli import entrypoint
 
 if __name__ == "__main__":
-    print("script by MapleCake NJUPT2025管院新生")
+    print("script by NJUPT2025届管院 MapleCake")
     print("    本脚本坚持免费，请抵制倒买倒卖行为")
     print("    喵~管用贴吧给个好评喵~")
     print("    github给个小星星就最好啦:https://github.com/MapleSugarCake/LabLearningAutoPass")
