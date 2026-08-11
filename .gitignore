@@ -9,6 +9,5 @@ wheels/
 # Virtual environments
 .idea
 .venv
-main.spec
-# build files
-*.ico
+.pytest_cache/
+.ruff_cache/
