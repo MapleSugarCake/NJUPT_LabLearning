@@ -53,7 +53,7 @@ wheels = [
 
 [[package]]
 name = "labpass"
-version = "0.4.3"
+version = "1.0.0"
 source = { virtual = "." }
 dependencies = [
     { name = "pycryptodome" },

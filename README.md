@@ -5,9 +5,6 @@
 
 该脚本已基本成型，出问题请参考重要说明。
 
-需安装requests库 
-
-pip install requests
 
 如果有擅长python，JavaScript，爬虫的同学，欢迎联系我完善它。
 
