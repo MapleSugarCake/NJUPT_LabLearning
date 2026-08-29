@@ -67,7 +67,7 @@ def _automatic_login(
     secret_input: Callable[[str], str],
 ) -> AuthenticationResult:
     username = input_fn("请输入学号：").strip()
-    password = secret_input("请输入密码：")
+    password = secret_input("【不显示已输入密码】请输入密码：")
     try:
         return authenticate_automatically(username, password)
     finally:
@@ -76,7 +76,7 @@ def _automatic_login(
 
 def _token_login(secret_input: Callable[[str], str]) -> AuthenticationResult:
     logger.warning("手动 Token 模式使用校内直连地址，请确认设备已连接校园网")
-    token = secret_input("请输入 X-Access-Token：")
+    token = secret_input("【不显示已输入Token】请输入 X-Access-Token：")
     try:
         return authenticate_with_token(token)
     finally:
