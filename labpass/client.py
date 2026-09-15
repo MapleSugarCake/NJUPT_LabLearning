@@ -178,13 +178,19 @@ class LabPassClient(AbstractContextManager["LabPassClient"]):
         for index, item in enumerate(raw_questions, start=1):
             if not isinstance(item, dict):
                 raise ResponseFormatError(f"第 {index} 道题目数据不是对象")
-            question_id = item.get("questionId", item.get("id"))
+            # submitAnswer 需要的是“课程-题目关联”记录的主键 id（relation id），
+            # 而非题目本身的 questionId。单选题里两者恰好相等，多选题里两者不同。
+            relation_id = item.get("id", item.get("questionId"))
             answer = item.get("correctAnswer")
-            if question_id is None or not str(question_id).strip():
-                raise ResponseFormatError(f"第 {index} 道题目缺少 questionId")
+            kind = item.get("kind")
+            if relation_id is None or not str(relation_id).strip():
+                raise ResponseFormatError(f"第 {index} 道题目缺少 id")
             if answer is None or answer == "" or answer == []:
                 raise ResponseFormatError(f"第 {index} 道题目缺少 correctAnswer")
-            questions.append(Question(id=str(question_id), answer=answer))
+            # 多选题（kind=3）前端以数组形式提交 option；correctAnswer 存的是逗号分隔字符串。
+            if str(kind) == "3" and isinstance(answer, str):
+                answer = [part.strip() for part in answer.split(",") if part.strip()]
+            questions.append(Question(id=str(relation_id), answer=answer))
         return questions
 
     def submit_answer(self, course_id: str, question: Question) -> None:

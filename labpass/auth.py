@@ -15,17 +15,12 @@ from .config import (
     CHECK_KEY,
     DEFAULT_HEADERS,
     INTRANET_API_ENDPOINTS,
+    INTRANET_VALIDATE_LOGIN_URL,
     REQUEST_TIMEOUT,
     SERVICE_URL,
     SSO_AFTER_LOGIN_URL,
     SSO_LOGIN_URL,
     SSO_PRELOGIN_URL,
-    VPN_API_ENDPOINTS,
-    VPN_CAS_AFTER_LOGIN_URL,
-    VPN_CAS_LOGIN_URL,
-    VPN_CAS_PRELOGIN_URL,
-    VPN_PRELOGIN_URL,
-    VPN_VALIDATE_LOGIN_URL,
     ApiEndpoints,
 )
 from .crypto import encrypt
@@ -95,11 +90,12 @@ def _login_payload(encrypted_username: str, encrypted_password: str) -> dict[str
     }
 
 
-def _extract_service_id(url: str) -> str:
-    match = re.search(r"[&?]service=([A-Za-z0-9]+)", url)
-    if not match:
-        raise AuthenticationError("VPN 登录响应缺少 service 标识，学校认证流程可能已变更")
-    return match.group(1)
+def _extract_service(url: str) -> str:
+    decoded_url = unquote(url)
+    query_service = parse_qs(urlparse(decoded_url).query).get("service")
+    if query_service and query_service[0]:
+        return query_service[0]
+    raise AuthenticationError("统一认证响应缺少 service 标识，学校认证流程可能已变更")
 
 
 def _extract_ticket(url: str) -> str:
@@ -114,13 +110,24 @@ def _extract_ticket(url: str) -> str:
     return match.group(1)
 
 
+def _extract_result_token(response: requests.Response, stage: str) -> str:
+    try:
+        payload = response.json()
+        token = payload["result"]["token"]
+    except (KeyError, TypeError, requests.JSONDecodeError, json.JSONDecodeError, ValueError):
+        raise AuthenticationError(f"{stage}未返回有效 Token") from None
+    if not isinstance(token, str) or not token.strip():
+        raise AuthenticationError(f"{stage}返回了空 Token")
+    return token
+
+
 def authenticate_automatically(
     username: str,
     password: str,
     *,
     session_factory: Callable[[], requests.Session] = requests.Session,
 ) -> AuthenticationResult:
-    """Complete the four-stage NJUPT SSO flow and return an authenticated Session."""
+    """Complete the NJUPT SSO flow and return an authenticated Session (校园网直连)."""
 
     if not username or not password:
         raise AuthenticationError("学号和密码不能为空")
@@ -130,12 +137,18 @@ def authenticate_automatically(
     encrypted_password = encrypt(password)
 
     try:
-        logger.info("正在建立 VPN 会话…")
-        _request(session, "GET", VPN_PRELOGIN_URL, "建立 VPN 会话")
-        _request(session, "GET", SSO_PRELOGIN_URL, "打开统一认证")
+        logger.info("正在打开统一身份认证…")
+        prelogin_response = _request(
+            session,
+            "GET",
+            SSO_PRELOGIN_URL,
+            "打开统一认证",
+            allow_redirects=True,
+        )
+        service = _extract_service(prelogin_response.url)
 
         logger.info("正在验证统一身份认证…")
-        _request(
+        login_response = _request(
             session,
             "POST",
             SSO_LOGIN_URL,
@@ -143,64 +156,33 @@ def authenticate_automatically(
             headers=DEFAULT_HEADERS,
             json=_login_payload(encrypted_username, encrypted_password),
         )
-        jsession_id = session.cookies.get("JSESSIONID")
-        if not jsession_id:
-            raise AuthenticationError("统一认证未返回 JSESSIONID，请检查账号、密码或验证码要求")
-        _request(
-            session,
-            "GET",
-            SSO_AFTER_LOGIN_URL,
-            "确认统一认证",
-            params={"sessionId": jsession_id},
-        )
+        tgc = _extract_result_token(login_response, "统一认证")
+        session.cookies.set("tgc", tgc, domain="i.njupt.edu.cn", path="/")
 
         logger.info("正在获取实验室系统访问权限…")
-        prelogin_response = _request(
-            session,
-            "GET",
-            VPN_CAS_PRELOGIN_URL,
-            "初始化实验室系统登录",
-        )
-        service_id = _extract_service_id(prelogin_response.url)
-        _request(
-            session,
-            "POST",
-            VPN_CAS_LOGIN_URL,
-            "授权实验室系统",
-            json=_login_payload(encrypted_username, encrypted_password),
-        )
         ticket_response = _request(
             session,
             "GET",
-            VPN_CAS_AFTER_LOGIN_URL,
+            SSO_AFTER_LOGIN_URL,
             "获取服务票据",
-            params={"sessionId": service_id},
+            params={"sessionId": service},
+            allow_redirects=True,
         )
         ticket = _extract_ticket(ticket_response.url)
 
         token_response = _request(
             session,
             "GET",
-            VPN_VALIDATE_LOGIN_URL,
+            INTRANET_VALIDATE_LOGIN_URL,
             "换取业务 Token",
-            params={
-                "_t": session.cookies.get("vpn_timestamp"),
-                "ticket": ticket,
-                "service": SERVICE_URL,
-                "enlink-vpn": None,
-            },
+            params={"ticket": ticket, "service": SERVICE_URL},
+            headers={"Origin": SERVICE_URL.rstrip("/"), "Referer": SERVICE_URL},
         )
-        try:
-            payload = token_response.json()
-            token = payload["result"]["token"]
-        except (KeyError, TypeError, requests.JSONDecodeError, json.JSONDecodeError, ValueError):
-            raise AuthenticationError("业务系统未返回有效 Token") from None
-        if not isinstance(token, str) or not token.strip():
-            raise AuthenticationError("业务系统返回了空 Token")
+        token = _extract_result_token(token_response, "业务系统")
 
         session.headers.update({"x-access-token": token})
         logger.info("自动登录成功")
-        return AuthenticationResult(session=session, endpoints=VPN_API_ENDPOINTS, mode="auto")
+        return AuthenticationResult(session=session, endpoints=INTRANET_API_ENDPOINTS, mode="auto")
     except Exception:
         session.close()
         raise
