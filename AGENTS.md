@@ -35,12 +35,22 @@ LabPass 是面向南京邮电大学实验室安全教育系统的 Python 3.13+ �
 - 只有全部题目成功提交后才可调用课程完成接口；没有题目的课程可以直接完成。
 - 不得在线程间共享同一个 `requests.Session`。每个课程任务必须使用独立 Session，并在任务结束后关闭。
 - 不同课程的 GET 可以并行，但 `submitAnswer` 和课程完成等状态变更 POST 必须通过同一个运行级写入协调器串行执行，同时最多只能有 1 个状态变更 POST。
+- 登录客户端及其所有课程客户端副本必须共享同一个 `MutationCoordinator`；克隆客户端时不得为每个 Session 创建独立协调器。
+
+### 题目与提交字段
+
+- 题目响应中存在三个容易混淆的标识，必须保持当前网页端已验证的映射：响应 `id` → 提交 Payload 的 `questionId`，响应 `courseId` → 提交 Payload 的 `id`。
+- 响应 `questionId` 是题库题目 ID，只保存为 `Question.source_question_id` 供诊断，当前 `submitAnswer` 接口不得提交该值。
+- `Question.submission_id`、`Question.course_id` 和 `Question.source_question_id` 的语义不得合并；调用答题接口时应传递完整 `Question`，不要重新从课程列表 ID 拼装 Payload。
+- 单选题和判断题答案保持字符串；只有包含逗号的字符串答案才拆分、去除两侧空白并转为列表。不得把无逗号的 `AB` 等字符串擅自拆分。
+- 课程完成接口继续使用课程列表中的 `Course.id`。没有新的脱敏网页抓包证据时，不得将其改成题目响应中的其他 ID。
 
 ### 网络与重试
 
 - 所有请求必须设置连接和读取超时，当前默认值为 10/30 秒。
 - 自动重试只允许用于 GET，当前最多尝试 3 次，并仅针对连接问题及 429、500、502、503、504。
 - POST 不得自动重试。POST 超时必须报告为“结果不确定”，提示用户先到网页核对。
+- 服务端可能返回 `acquire lock fail` 或拼写错误的 `aquire lock fail`；两者都必须转换为 `LockConflictError`，向用户说明未自动重试，不得通过盲目重发 POST 处理。
 - 每个响应都要检查 HTTP 状态；JSON 业务响应还要检查 `success`、`code`、`message` 和需要的 `result`。
 - 单课程错误应记录失败并继续其他课程；401/403 或业务层认证失效属于全局错误，应取消待执行任务并返回退出码 2。
 
@@ -81,6 +91,8 @@ LabPass 是面向南京邮电大学实验室安全教育系统的 Python 3.13+ �
 - 不得在 fixture 中使用真实账号、密码、Cookie、Ticket 或 Token。
 - 并发测试需要验证最大活跃任务数不超过 4，并验证每个任务使用独立客户端或 Session。
 - 并发测试还需验证课程读取可以重叠，而所有状态变更 POST 的最大并发数为 1。
+- 答题载荷回归测试必须为响应 `id`、`courseId`、`questionId` 使用三个不同的假值，并精确断言 Payload，防止字段映射错误被相同测试值掩盖。
+- 锁错误测试必须同时覆盖 `acquire` 和 `aquire` 两种拼写，并断言失败的 POST 只调用一次。
 - 请求测试需要验证 GET 重试边界和 POST 不重试/结果不确定行为。
 - 日志相关修改必须验证敏感字段脱敏。
 - CLI 修改必须覆盖参数校验和相关退出码。
