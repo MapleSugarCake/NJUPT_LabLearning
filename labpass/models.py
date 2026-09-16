@@ -2,7 +2,6 @@
 
 from dataclasses import dataclass, field
 from enum import StrEnum
-from typing import Any
 
 
 @dataclass(frozen=True, slots=True)
@@ -15,8 +14,11 @@ class Course:
 
 @dataclass(frozen=True, slots=True)
 class Question:
-    id: str
-    answer: Any
+    submission_id: str
+    course_id: str
+    answer: str | list[str]
+    source_question_id: str | None = None
+    kind: str | None = None
 
 
 class CourseStatus(StrEnum):

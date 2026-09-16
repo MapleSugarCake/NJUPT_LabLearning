@@ -25,6 +25,10 @@ class ApiError(LabPassError):
     """The remote API rejected a request."""
 
 
+class LockConflictError(ApiError):
+    """The remote API could not acquire its mutation lock."""
+
+
 class ResponseFormatError(ApiError):
     """The remote API returned an unexpected response shape."""
 

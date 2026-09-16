@@ -81,12 +81,12 @@ class CourseRunner:
                 for question in questions:
                     if self._authentication_failed.is_set():
                         raise AuthenticationExpiredError("任务因登录状态失效而取消")
-                    worker_client.submit_answer(course.id, question)
+                    worker_client.submit_answer(question)
                     answered += 1
                     logger.debug(
                         "课程 %s：题目 %s 提交成功（%d/%d）",
                         course.id,
-                        question.id,
+                        question.submission_id,
                         answered,
                         len(questions),
                     )

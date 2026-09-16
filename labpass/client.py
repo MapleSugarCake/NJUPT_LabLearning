@@ -2,9 +2,10 @@
 
 import json
 import logging
+import threading
 import time
-from collections.abc import Callable
-from contextlib import AbstractContextManager
+from collections.abc import Callable, Iterator
+from contextlib import AbstractContextManager, contextmanager
 from typing import Any, Self
 
 import requests
@@ -13,6 +14,7 @@ from .config import REQUEST_TIMEOUT, ApiEndpoints
 from .exceptions import (
     ApiError,
     AuthenticationExpiredError,
+    LockConflictError,
     NetworkError,
     ResponseFormatError,
     SubmissionUncertainError,
@@ -24,6 +26,18 @@ from .models import Course, Question
 logger = logging.getLogger(__name__)
 
 
+class MutationCoordinator:
+    """Serialize state-changing API calls made by cloned worker clients."""
+
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+
+    @contextmanager
+    def serialized(self) -> Iterator[None]:
+        with self._lock:
+            yield
+
+
 class LabPassClient(AbstractContextManager["LabPassClient"]):
     """API client whose authenticated state can be cloned into worker Sessions."""
 
@@ -33,10 +47,12 @@ class LabPassClient(AbstractContextManager["LabPassClient"]):
         endpoints: ApiEndpoints,
         *,
         session_factory: Callable[[], requests.Session] = requests.Session,
+        mutation_coordinator: MutationCoordinator | None = None,
     ) -> None:
         self.session = session
         self.endpoints = endpoints
         self._session_factory = session_factory
+        self._mutation_coordinator = mutation_coordinator or MutationCoordinator()
 
     def __enter__(self) -> Self:
         return self
@@ -53,7 +69,12 @@ class LabPassClient(AbstractContextManager["LabPassClient"]):
         session = configure_session(self._session_factory())
         session.headers.update(dict(self.session.headers))
         session.cookies.update(self.session.cookies)
-        return LabPassClient(session, self.endpoints, session_factory=self._session_factory)
+        return LabPassClient(
+            session,
+            self.endpoints,
+            session_factory=self._session_factory,
+            mutation_coordinator=self._mutation_coordinator,
+        )
 
     def _request_json(
         self,
@@ -109,6 +130,10 @@ class LabPassClient(AbstractContextManager["LabPassClient"]):
             message = safe_excerpt(payload.get("message") or "服务器返回业务错误")
             if str(code) in {"401", "403"}:
                 raise AuthenticationExpiredError(f"登录状态已失效：{message}")
+            if method.upper() == "POST" and _is_lock_conflict(message):
+                raise LockConflictError(
+                    f"{endpoint_name}失败：服务器写入锁冲突（未自动重试），请稍后重试"
+                )
             raise ApiError(f"{endpoint_name}失败：{message}")
         if require_result and "result" not in payload:
             raise ResponseFormatError(f"{endpoint_name}响应缺少 result 字段")
@@ -178,32 +203,48 @@ class LabPassClient(AbstractContextManager["LabPassClient"]):
         for index, item in enumerate(raw_questions, start=1):
             if not isinstance(item, dict):
                 raise ResponseFormatError(f"第 {index} 道题目数据不是对象")
-            question_id = item.get("questionId", item.get("id"))
-            answer = item.get("correctAnswer")
-            if question_id is None or not str(question_id).strip():
-                raise ResponseFormatError(f"第 {index} 道题目缺少 questionId")
-            if answer is None or answer == "" or answer == []:
-                raise ResponseFormatError(f"第 {index} 道题目缺少 correctAnswer")
-            questions.append(Question(id=str(question_id), answer=answer))
+            submission_id = _required_text(item, "id", index)
+            question_course_id = _required_text(item, "courseId", index)
+            answer = _normalize_answer(item.get("correctAnswer"), index)
+            questions.append(
+                Question(
+                    submission_id=submission_id,
+                    course_id=question_course_id,
+                    answer=answer,
+                    source_question_id=_first_text(item, "questionId"),
+                    kind=_first_text(item, "kind", "kind_dictText"),
+                )
+            )
+        logger.debug(
+            "课程 %s：已解析 %d 道题（提交 questionId 取响应 id，提交 id 取响应 courseId）",
+            course_id,
+            len(questions),
+        )
         return questions
 
-    def submit_answer(self, course_id: str, question: Question) -> None:
-        self._request_json(
-            "POST",
-            self.endpoints.submit_answer,
-            "提交题目答案",
-            require_result=False,
-            json={"id": course_id, "option": question.answer, "questionId": question.id},
-        )
+    def submit_answer(self, question: Question) -> None:
+        with self._mutation_coordinator.serialized():
+            self._request_json(
+                "POST",
+                self.endpoints.submit_answer,
+                "提交题目答案",
+                require_result=False,
+                json={
+                    "questionId": question.submission_id,
+                    "id": question.course_id,
+                    "option": question.answer,
+                },
+            )
 
     def finish_course(self, course_id: str) -> None:
-        self._request_json(
-            "POST",
-            self.endpoints.finish_course,
-            "标记课程完成",
-            require_result=False,
-            json={"id": course_id},
-        )
+        with self._mutation_coordinator.serialized():
+            self._request_json(
+                "POST",
+                self.endpoints.finish_course,
+                "标记课程完成",
+                require_result=False,
+                json={"id": course_id},
+            )
 
 
 def _first_text(item: dict[str, Any], *keys: str) -> str | None:
@@ -212,6 +253,45 @@ def _first_text(item: dict[str, Any], *keys: str) -> str | None:
         if value is not None and str(value).strip():
             return str(value).strip()
     return None
+
+
+def _required_text(item: dict[str, Any], key: str, index: int) -> str:
+    value = item.get(key)
+    if value is None or not str(value).strip():
+        raise ResponseFormatError(f"第 {index} 道题目缺少 {key}")
+    return str(value).strip()
+
+
+def _normalize_answer(value: object, index: int) -> str | list[str]:
+    if isinstance(value, str):
+        answer = value.strip()
+        if not answer:
+            raise ResponseFormatError(f"第 {index} 道题目缺少 correctAnswer")
+        if "," not in answer:
+            return answer
+        options = [option.strip() for option in answer.split(",")]
+        if any(not option for option in options):
+            raise ResponseFormatError(f"第 {index} 道题目的 correctAnswer 格式无效")
+        return options
+
+    if isinstance(value, list):
+        if not value:
+            raise ResponseFormatError(f"第 {index} 道题目缺少 correctAnswer")
+        if not all(isinstance(option, str) for option in value):
+            raise ResponseFormatError(f"第 {index} 道题目的 correctAnswer 类型无效")
+        options = [option.strip() for option in value]
+        if any(not option for option in options):
+            raise ResponseFormatError(f"第 {index} 道题目的 correctAnswer 格式无效")
+        return options
+
+    if value is None:
+        raise ResponseFormatError(f"第 {index} 道题目缺少 correctAnswer")
+    raise ResponseFormatError(f"第 {index} 道题目的 correctAnswer 类型无效")
+
+
+def _is_lock_conflict(message: str) -> bool:
+    normalized = message.casefold()
+    return "acquire lock fail" in normalized or "aquire lock fail" in normalized
 
 
 def _is_finished(value: object) -> bool:
