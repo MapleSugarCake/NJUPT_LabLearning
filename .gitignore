@@ -4,6 +4,7 @@ __pycache__/
 build/
 dist/
 wheels/
+Temp/
 *.egg-info
 
 # Virtual environments
@@ -11,3 +12,4 @@ wheels/
 .venv
 .pytest_cache/
 .ruff_cache/
+labpass_log.txt

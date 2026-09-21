@@ -1,12 +1,13 @@
-# -*- mode: python ; coding: utf-8 -*-
-
+from PyInstaller.building.api import EXE, PYZ
+from PyInstaller.building.build_main import Analysis
+from PyInstaller.utils.hooks import copy_metadata
 
 a = Analysis(
     ["main.py"],
     pathex=[],
     binaries=[],
-    datas=[],
-    hiddenimports=[],
+    datas=copy_metadata("labpass"),
+    hiddenimports=["playwright.sync_api"],
     hookspath=[],
     hooksconfig={},
     runtime_hooks=[],

@@ -1,7 +1,8 @@
 """Typed domain models used by the client and runner."""
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from enum import StrEnum
+from typing import Literal
 
 
 @dataclass(frozen=True, slots=True)
@@ -21,6 +22,16 @@ class Question:
     kind: str | None = None
 
 
+@dataclass(frozen=True, slots=True)
+class CourseProgress:
+    """Business progress data; the caller decides how to display it."""
+
+    course: Course
+    stage: Literal["started", "answered"]
+    answered_count: int = 0
+    question_count: int = 0
+
+
 class CourseStatus(StrEnum):
     SUCCESS = "success"
     FAILED = "failed"
@@ -38,19 +49,3 @@ class CourseResult:
     @property
     def succeeded(self) -> bool:
         return self.status is CourseStatus.SUCCESS
-
-
-@dataclass(frozen=True, slots=True)
-class RunSummary:
-    discovered: int
-    already_finished: int
-    results: tuple[CourseResult, ...] = field(default_factory=tuple)
-    elapsed_seconds: float = 0.0
-
-    @property
-    def succeeded(self) -> int:
-        return sum(result.succeeded for result in self.results)
-
-    @property
-    def failed(self) -> int:
-        return len(self.results) - self.succeeded

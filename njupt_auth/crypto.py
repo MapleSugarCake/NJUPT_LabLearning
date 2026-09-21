@@ -6,13 +6,13 @@ from Crypto.Cipher import AES
 from Crypto.Util.Padding import pad
 
 from .config import CHECK_KEY
-from .exceptions import ConfigurationError
+from .errors import AuthProtocolError
 
 
 def _key_and_iv(t_param: str | int) -> tuple[bytes, bytes]:
     key = f"iam{t_param}".encode()
     if len(key) not in AES.key_size:
-        raise ConfigurationError("统一认证加密参数长度无效")
+        raise AuthProtocolError("统一认证加密参数长度无效")
     return key, key
 
 

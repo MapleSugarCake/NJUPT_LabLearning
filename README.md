@@ -1,220 +1,149 @@
 # LabPass
 
-> 南京邮电大学实验室安全教育课程辅助脚本
->
-> Version 1.0.1 · Python 3.13+
+南京邮电大学实验室安全教育课程辅助工具，要求 Python 3.13+。版本以 `pyproject.toml` 的 `project.version` 为唯一来源，启动时自动显示。
 
-LabPass 可以自动登录实验室安全教育系统，动态发现当前账号的课程，完成课程题目并提交学习完成状态。脚本默认同时处理最多 4 门课程，并为普通用户提供清晰进度，为开发者提供脱敏调试输出。
+本工具用于本人账号的课程学习与课程答题，不能完成考试。考试仍需本人手动完成。本项目坚持免费。
 
-> [!WARNING]
-> 本项目仅用于处理本人账号下的课程学习与课程答题。考试仍需本人手动完成。请遵守学校规定，不要共享账号、密码或 Token，也不要出售本项目或将其用于未经授权的账号。
-
-## 功能特性
-
-- 自动完成 NJUPT 统一身份认证和 VPN 登录
-- 动态获取账号课程，不维护易失效的硬编码课程 ID
-- 自动跳过已完成课程，按课程 ID 去重
-- 课程级 1–4 线程并发，默认使用 4 个线程；课程读取可并行，状态变更 POST 串行
-- 单门课程内严格按题目顺序提交，全部成功后才标记课程完成
-- GET 请求超时重试，POST 请求不盲目重试
-- 课程失败后继续处理其他课程，并在结尾统一汇总
-- 默认输出简洁进度，`--debug` 提供脱敏诊断信息
-- 支持 Python 源码与 Windows 控制台 EXE
-
-## 使用前准备
-
-源码运行需要：
-
-- Windows 10/11
-- Python 3.13 或更高版本
-- [uv](https://docs.astral.sh/uv/)
-- 可访问南京邮电大学统一认证与 VPN 服务的网络
-
-项目不会保存账号、密码、Token、Cookie 或运行日志。密码和 Token 均使用隐藏输入。
-
-## 快速开始
-
-### 源码运行
+## 安装与启动
 
 ```powershell
-git clone https://github.com/MapleSugarCake/LabLearningAutoPass.git
-cd LabLearningAutoPass
 uv sync
-uv run labpass
-```
-
-也可以继续使用兼容入口：
-
-```powershell
 uv run python main.py
 ```
 
-程序会依次提示输入学号和密码。自动登录失败时，可选择切换到手动 Token 模式。
-
-### Windows EXE
-
-直接运行 `labpass.exe`，按照控制台提示操作即可。冻结版默认在结束时等待回车，以便查看结果；从已有终端启动时可使用：
+也可使用安装后的控制台入口：
 
 ```powershell
-labpass.exe --no-pause
+uv run labpass
 ```
 
-## 登录方式
+程序完全通过控制台交互配置，不再解析命令行参数，也不提供旧包、旧参数兼容层。
 
-| 模式 | 命令 | 适用场景 |
+需要浏览器兜底时，安装可选依赖，并确保本机已安装 Microsoft Edge：
+
+```powershell
+uv sync --extra browser
+uv run --extra browser python main.py
+```
+
+浏览器组件使用 Playwright 驱动本机 Edge，不读取日常浏览器配置，不在运行时自动下载或安装浏览器。未安装可选依赖时，账号密码和校园网 Token 登录仍可使用。
+
+Windows 用户可以直接运行构建好的 `labpass.exe`。EXE 保持控制台模式，退出前等待回车；源码运行不暂停。
+
+## 控制台交互
+
+1. 首先显示版本号。
+2. 第一次输入询问“是否自定义设置？[y/N]”。回车或 `n` 使用默认值：debug 关闭、课程线程数 4。
+3. 选择 `y` 后，依次选择是否开启 debug 和课程线程数。线程数只接受 1–4，回车默认 4；非法输入重新询问。
+4. 每次登录前选择网络环境：`1` 为校外 VPN（默认），`2` 为校园网直连。不会自动探测网络。
+5. 输入学号和密码。**密码明文显示**，输入两侧空格也会作为密码的一部分保留。
+6. 默认尝试账号密码登录；失败后可选 `1` 浏览器、`2` 校园网 Token、`0` 退出（默认）。失败请求不会自动重新提交。
+7. 显示课程进度、失败原因及最终汇总，自动跳过已完成课程。
+
+`y/n` 不区分大小写。本次设置不保存到磁盘。Token 仍通过隐藏输入获取。
+
+## 登录方式与网络要求
+
+| 方式 | 网络 | 行为 |
 | --- | --- | --- |
-| 自动登录 | `uv run labpass` | 默认方式，通过统一认证和学校 VPN 获取业务 Token |
-| 手动 Token | `uv run labpass --login-mode token` | 自动登录流程临时失效时使用；必须连接校园网 |
+| 账号密码 | 校外 | 保留原有 VPN、统一认证、映射 CAS 和实验室资源 Token 链路 |
+| 账号密码 | 校园网 | 直连 CAS，按本次 service 获取应用配置和实验室资源 Token |
+| 浏览器兜底 | 校内或校外 | 在新的临时 Edge 会话中由用户完成登录、验证码等操作，再交接已验证的 Session |
+| 手动 Token | 仅校园网 | 隐藏输入实验室资源 Token，然后直连验证权限 |
+
+所有方式都先读取实验室权限接口验证认证结果，再读取课程列表。身份门户 Token 与实验室资源 Token 不可混用。校外访问还依赖 VPN 会话，单独粘贴 Token 不能替代 VPN 上下文。
+
+浏览器兜底仅监听本次会话中准确匹配实验室 `validateLogin` 地址、请求方法和目标 service 的成功响应，从中取得资源 Token，复制适用于资源地址的 Cookie，并使用 `requests.Session` 进行只读鉴权。不会猜测 VPN 页面存储键，也不会将门户响应当成实验室认证结果。等待上限 5 分钟，关闭窗口、超时或 Edge 不可用时可以重新选择登录方式。
 
 手动 Token 获取步骤：
 
-1. 连接校园网并访问 `http://10.22.192.38:9092/`，登录自己的账号。
-2. 打开任意课程，然后打开 Chrome/Edge 开发者工具的“网络”面板。
-3. 使用 `updatevisits` 过滤请求并刷新页面。
-4. 在 XHR 请求标头中复制 `x-access-token`。
-5. 启动手动模式，并在隐藏输入提示中粘贴 Token。
+1. 连接校园网，在浏览器中登录 `http://10.22.192.38:9092/`。
+2. 打开浏览器开发者工具的网络面板，查找实验室权限等已存在的只读请求，例如 `getUserPermissionByToken`。
+3. 在该请求的请求头中复制 `X-Access-Token`，不要复制智慧校园门户的 Token。
+4. 运行程序，在账号密码登录失败后的回退菜单选择校园网 Token，并在隐藏提示中粘贴。
 
-Token 等同于临时登录凭据，请勿截图、上传或发送给他人。
+无需为了获取 Token 提交题目或调用课程完成接口。不要分享真实 Token、Cookie 或抓包文件。
 
-## 命令行参数
+## 日志与隐私
 
-```text
-usage: labpass [-h] [--workers 1-4] [--debug]
-               [--login-mode {auto,token}] [--no-pause] [--version]
-```
+debug 关闭时不创建或检查日志文件，不输出 debug 信息；保留版本、必要提示、课程进度、失败原因和汇总。
 
-| 参数 | 默认值 | 说明 |
-| --- | --- | --- |
-| `--workers 1-4` | `4` | 同时调度的课程数；题目读取可并行，答题和完成 POST 会自动串行 |
-| `--debug` | 关闭 | 显示请求阶段、端点、耗时和异常堆栈；敏感信息仍会脱敏 |
-| `--login-mode auto\|token` | `auto` | 选择自动登录或校园网手动 Token 登录 |
-| `--no-pause` | 关闭 | EXE 运行结束后不等待回车 |
-| `--version` | — | 显示当前版本 |
+debug 开启时同时写入控制台和 UTF-8 文件 `labpass_log.txt`。日期时间包含在日志内容中，文件名不加时间戳：
 
-示例：使用两个课程线程并开启调试输出。
+- 源码运行：保存在启动时的工作目录。
+- EXE 运行：保存在 EXE 所在目录，与当前终端目录、解压临时目录无关。
+- 同名文件已存在：立即报错并退出，不覆盖、不追加。请自行移动或删除旧日志后再运行。
+- 目录不可写：报错并退出，不静默切换目录或关闭 debug。
 
-```powershell
-uv run labpass --workers 2 --debug
-```
+密码明文输入仅改变终端回显，不会把输入内容录入日志。日志、异常消息和调试堆栈会脱敏密码、Token、Cookie、`tgc`、CAS ticket、sessionId、完整学号及运行中登记的秘密值。程序不持久化认证信息；浏览器使用临时上下文，不保存认证状态、HAR、trace 或截图。提交日志前仍应检查个人信息。
 
-## 运行输出
-
-默认输出只展示用户需要关注的信息：
+## 项目职责
 
 ```text
-15:30:01 | INFO    | MainThread | LabPass 1.0.0
-15:30:02 | INFO    | MainThread | 自动登录成功
-15:30:03 | INFO    | MainThread | 发现 12 门课程：4 门已完成，8 门待处理
-15:30:03 | INFO    | course_0  | 开始处理：消防安全（181...）
-15:30:05 | INFO    | MainThread | [1/8] 完成：消防安全（181...），已提交 2 道题
-15:30:12 | INFO    | MainThread | 执行汇总：发现 12，跳过 4，成功 8，失败 0，总耗时 11.2 秒
+main.py                    # 唯一脚本入口，只调用 CLI entrypoint
+njupt_auth/                # 认证、加密、资源 Session、HTTP 策略和脱敏
+njupt_safetylabpass/        # 课程 API、模型、单课程业务与写入协调器
+labpass_cli/               # 交互、配置、日志、线程调度、进度和汇总
+tests/                     # 默认阻断网络的模拟回归测试
+main.spec                  # Windows 控制台 EXE 配置
+pyproject.toml             # 唯一版本源、依赖和构建配置
+uv.lock                    # 依赖锁文件
 ```
 
-若某门课程失败，脚本会继续处理其他课程，并在最后列出课程和原因。POST 超时会标记为“提交结果不确定”，此时请先到网页核对，不要立即重复运行。
+认证包不依赖业务包或 CLI；业务包不依赖 CLI。业务包复用认证包的基础超时常量和脱敏工具，登录流程不进入业务层。
 
-## 项目架构
+认证结果包含实际 `requests.Session`、资源 API 基址及独立 Session 工厂。CLI 将它们传给 `SafetyLabClient`。返回的资源 Session 是 `requests.Session` 子类，负责将认证头限制在资源 API 范围内，并保留 VPN 访问参数。
 
-```text
-LabLearningAutoPass/
-├── main.py                  # 源码与 PyInstaller 兼容入口
-├── labpass/
-│   ├── auth.py              # SSO/VPN 自动认证与 Token 回退
-│   ├── client.py            # API 请求、响应校验与独立工作 Session
-│   ├── runner.py            # 最多 4 线程的课程调度和结果聚合
-│   ├── cli.py               # 参数、交互、退出码和最终汇总
-│   ├── models.py            # Course、Question、CourseResult 等模型
-│   ├── config.py            # URL、超时、请求头和并发默认值
-│   ├── http.py              # GET-only 重试策略
-│   ├── crypto.py            # 与学校前端兼容的 AES-CBC 加密
-│   └── logging_utils.py     # 控制台日志与敏感信息脱敏
-├── tests/                   # 不访问真实学校接口的模拟测试
-├── main.spec                # Windows 控制台 EXE 构建配置
-├── favicon.ico              # EXE 图标
-├── pyproject.toml           # 项目元数据、依赖和工具配置
-└── uv.lock                  # 可复现依赖锁文件
-```
+主 Session 用于读取课程列表。每个课程任务从认证快照创建自己的 Session、CookieJar 和连接适配器，并在任务结束时关闭。主客户端与全部课程副本共享一个运行级 `MutationCoordinator`。所有线程结束后，再关闭主客户端和认证工厂。
 
-执行流程：
+单课程流程在 `njupt_safetylabpass.run_course` 内执行；`labpass_cli.runner.CourseRunner` 只管理线程池与结果回调；控制台文本由 CLI 渲染。
 
-```mermaid
-flowchart LR
-    A[隐藏输入凭据] --> B{登录方式}
-    B -->|自动| C[SSO 与 VPN 认证]
-    B -->|Token| D[校园网直连]
-    C --> E[获取并去重课程]
-    D --> E
-    E --> F[跳过已完成课程]
-    F --> G[最多 4 个课程工作线程]
-    G --> H[每门课顺序答题]
-    H --> I[标记课程完成]
-    I --> J[成功/失败汇总]
-```
+## 业务、并发与错误处理
 
-`requests.Session` 不在线程间共享。登录会话只负责获取课程列表，每门并发课程都会复制认证快照并创建独立 Session，任务结束后立即关闭。不同课程可以并行读取题目，但所有答题和课程完成 POST 通过同一个写入协调器串行发送，避免争抢学校服务器的业务锁。
-
-题目接口中的三个 ID 含义不同：题目关系记录的 `id` 用作提交请求的 `questionId`，关系记录的 `courseId` 用作提交请求的 `id`；题库自身的 `questionId` 不参与答题提交。该映射以网页端实际成功请求为兼容基线。
-
-## 错误处理与退出码
+- 只能并发不同课程，默认 4 个线程，任何配置不得超过 4。
+- 每门课程按返回顺序逐题提交；全部成功后才标记完成，无题课程可直接完成。
+- 课程 GET 可以并行。所有答题和课程完成 POST 共用一个写入锁，最大同时执行数为 1。
+- 题目响应 `id` 对应提交 `questionId`；响应 `courseId` 对应提交 `id`；响应 `questionId` 仅作为 `source_question_id` 保存。
+- 仅包含逗号的字符串答案拆分成列表；无逗号的 `AB` 保持字符串。课程完成使用课程列表 `Course.id`。
+- 连接/读取超时默认 10/30 秒。GET 最多三次尝试，仅重试连接/读取故障及 429、500、502、503、504；认证失败、证书错误、413 不重试。
+- 底层适配器不自动重试。POST 不自动重试，也不通过 307/308 重放；ticket 消费和 Token 交换只尝试一次。
+- POST 超时或连接中断报告结果不确定，请先到网页核对。`acquire lock fail` 和 `aquire lock fail` 均报告锁冲突且不自动重试。
+- 单课程失败后继续其他课程。HTTP/业务认证失效会取消待执行任务，阻止排队写入继续发送；已经发出的请求需等待结束。
+- 不自动刷新 Token、不在课程线程中重新登录、不重放失败的写入。
 
 | 退出码 | 含义 |
 | --- | --- |
-| `0` | 所有待处理课程成功，或没有待处理课程 |
-| `1` | 至少一门课程失败；其他课程已继续处理 |
-| `2` | 配置、登录、课程列表或全局认证状态失败 |
-| `130` | 用户通过 `Ctrl+C` 中断 |
+| 0 | 所有待处理课程成功，或没有待处理课程 |
+| 1 | 至少一门课程失败，已完成结果汇总 |
+| 2 | 配置、输入、日志初始化、认证、课程列表或全局认证失败 |
+| 130 | 用户通过 Ctrl+C 中断 |
 
-常见问题：
-
-| 现象 | 建议 |
-| --- | --- |
-| 自动登录失败 | 检查账号密码、统一认证是否新增验证码；按提示尝试校园网 Token 模式 |
-| 请求超时或服务器 5xx | 稍后重试，或使用 `--workers 1` 降低并发 |
-| HTTP 401/403 | 登录状态已失效，重新启动脚本登录 |
-| `acquire lock fail` / `aquire lock fail` | 脚本不会自动重试该 POST；先确认使用最新版本，稍后重试并在网页核对状态 |
-| POST 结果不确定 | 先在网页检查课程/题目状态，避免重复提交 |
-| 需要报告问题 | 使用 `--debug` 重现，并只提供已脱敏的控制台输出 |
-
-调试模式不会主动输出请求体、密码、Token、Cookie 或 CAS ticket；响应异常时最多显示截断并脱敏的摘要。提交问题前仍请人工检查输出中是否包含个人信息。
-
-## 开发与测试
-
-安装开发和构建依赖：
+## 开发、测试与构建
 
 ```powershell
-uv sync --group dev --group build
-```
-
-运行质量检查：
-
-```powershell
-uv run python -m compileall -q main.py labpass tests
+uv sync --extra browser --group dev --group build
+uv run python -m compileall -q main.py njupt_auth njupt_safetylabpass labpass_cli tests
 uv run pytest
 uv run ruff check .
 uv run ruff format --check .
+uv build
+uv run --extra browser --group build pyinstaller --clean --noconfirm main.spec
 ```
 
-测试使用模拟 HTTP Session，不会登录真实账号，也不会向学校接口提交数据。
+EXE 位于 `dist/labpass.exe`。构建会包含由项目元数据生成的版本信息、Playwright Python 组件和驱动，但不包含 Edge 浏览器本体。`build/`、`dist/` 和调试日志不提交到仓库。
 
-## 构建 Windows EXE
+依赖变更后使用 `uv lock` 更新锁文件，不手工修改。测试参考历史有效基线重新组织，并覆盖认证、浏览器响应、重试、敏感信息、交互、题目载荷、课程顺序、Session 隔离、并发写入及退出码。测试默认阻断 HTTP 和 socket 网络出口；浏览器测试使用模拟对象，不启动学校页面。
 
-```powershell
-uv run --group build pyinstaller --clean main.spec
-```
+构建后分别验证 wheel/sdist 安装和三包导入，以及 EXE 的无参数启动、版本首行、输入结束退出、源码/EXE 日志路径和日志冲突行为。程序不再提供 `--help`、`--version`；无凭据启动检查应在网络选择或凭据输入前结束，不能以真实账号执行自动验收。
 
-构建产物位于 `dist/labpass.exe`。`main.spec` 使用控制台模式，以保证交互输入和运行进度可见。
+## 验证边界
 
-## 已知限制
+现有校外流程以维护者此前确认可用的实现为迁移基线。本次新增和重构的校内外 HTTP、浏览器能力，需要维护者使用本人账号分别进行真实环境验收；模拟测试、离线构建和 EXE 启动检查不能证明真实认证已成功。
 
-- 学校统一认证、VPN 路径或业务响应字段变化后，自动登录可能需要同步更新。
-- 手动 Token 模式使用校内直连地址，校外网络不可用。
-- 为避免重复写入，POST 请求不会自动重试；超时后需人工核对结果。
-- 多课程模式会并行获取题目，但答题与完成请求会串行发送，因此线程数主要改善读取和等待阶段的效率。
-- 本项目不会自动完成考试，也无法替代用户对最终网页状态的确认。
+维护者应分别确认校内外登录、课程列表及状态、课程并发上限、单课程顺序和网页最终状态。自动测试、构建验证、真实账号测试必须分别记录，未执行的项目明确标为未验证。
 
 ## 作者与反馈
 
 - Author: MapleCake（NJUPT 2025届）
-- GitHub: [MapleSugarCake/LabLearningAutoPass](https://github.com/MapleSugarCake/LabLearningAutoPass)
+- GitHub: https://github.com/MapleSugarCake/LabLearningAutoPass
 - QQ: 292441165
-
-本项目坚持免费。如发现倒买倒卖，请勿购买。

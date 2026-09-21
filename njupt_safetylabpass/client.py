@@ -2,15 +2,17 @@
 
 import json
 import logging
-import threading
 import time
-from collections.abc import Callable, Iterator
-from contextlib import AbstractContextManager, contextmanager
+from collections.abc import Callable
+from contextlib import AbstractContextManager
 from typing import Any, Self
 
 import requests
 
-from .config import REQUEST_TIMEOUT, ApiEndpoints
+from njupt_auth.config import REQUEST_TIMEOUT
+from njupt_auth.redaction import Redactor
+
+from .coordination import MutationCoordinator
 from .exceptions import (
     ApiError,
     AuthenticationExpiredError,
@@ -19,40 +21,27 @@ from .exceptions import (
     ResponseFormatError,
     SubmissionUncertainError,
 )
-from .http import configure_session
-from .logging_utils import safe_excerpt
 from .models import Course, Question
 
 logger = logging.getLogger(__name__)
 
 
-class MutationCoordinator:
-    """Serialize state-changing API calls made by cloned worker clients."""
-
-    def __init__(self) -> None:
-        self._lock = threading.Lock()
-
-    @contextmanager
-    def serialized(self) -> Iterator[None]:
-        with self._lock:
-            yield
-
-
-class LabPassClient(AbstractContextManager["LabPassClient"]):
+class SafetyLabClient(AbstractContextManager["SafetyLabClient"]):
     """API client whose authenticated state can be cloned into worker Sessions."""
 
     def __init__(
         self,
         session: requests.Session,
-        endpoints: ApiEndpoints,
         *,
-        session_factory: Callable[[], requests.Session] = requests.Session,
-        mutation_coordinator: MutationCoordinator | None = None,
+        api_base_url: str,
+        session_factory: Callable[[], requests.Session],
+        mutation_coordinator: MutationCoordinator,
     ) -> None:
         self.session = session
-        self.endpoints = endpoints
+        self.api_base_url = api_base_url.rstrip("/")
+        self.redactor = getattr(session, "redactor", Redactor())
         self._session_factory = session_factory
-        self._mutation_coordinator = mutation_coordinator or MutationCoordinator()
+        self.mutation_coordinator = mutation_coordinator
 
     def __enter__(self) -> Self:
         return self
@@ -63,17 +52,15 @@ class LabPassClient(AbstractContextManager["LabPassClient"]):
     def close(self) -> None:
         self.session.close()
 
-    def clone(self) -> "LabPassClient":
+    def clone(self) -> "SafetyLabClient":
         """Create an independent Session with a snapshot of authentication state."""
 
-        session = configure_session(self._session_factory())
-        session.headers.update(dict(self.session.headers))
-        session.cookies.update(self.session.cookies)
-        return LabPassClient(
+        session = self._session_factory()
+        return SafetyLabClient(
             session,
-            self.endpoints,
+            api_base_url=self.api_base_url,
             session_factory=self._session_factory,
-            mutation_coordinator=self._mutation_coordinator,
+            mutation_coordinator=self.mutation_coordinator,
         )
 
     def _request_json(
@@ -85,18 +72,25 @@ class LabPassClient(AbstractContextManager["LabPassClient"]):
         require_result: bool,
         **kwargs: Any,
     ) -> dict[str, Any]:
+        self.mutation_coordinator.check_cancelled()
         started = time.perf_counter()
         logger.debug("API 请求开始：%s %s", method, endpoint_name)
         try:
-            response = self.session.request(method, url, timeout=REQUEST_TIMEOUT, **kwargs)
+            response = self.session.request(
+                method, url, timeout=REQUEST_TIMEOUT, allow_redirects=False, **kwargs
+            )
         except requests.Timeout:
             if method.upper() == "POST":
                 raise SubmissionUncertainError(
                     f"{endpoint_name}请求超时，服务器是否已处理无法确认，请到网页核对"
                 ) from None
             raise NetworkError(f"{endpoint_name}请求超时") from None
-        except requests.RequestException as exc:
-            raise NetworkError(f"{endpoint_name}网络请求失败：{safe_excerpt(exc)}") from None
+        except requests.RequestException:
+            if method.upper() == "POST":
+                raise SubmissionUncertainError(
+                    f"{endpoint_name}连接中断，结果不确定；未重试，请到网页核对"
+                ) from None
+            raise NetworkError(f"{endpoint_name}网络请求失败") from None
 
         elapsed = time.perf_counter() - started
         logger.debug(
@@ -107,51 +101,56 @@ class LabPassClient(AbstractContextManager["LabPassClient"]):
             elapsed,
         )
 
-        if response.status_code in {401, 403}:
-            raise AuthenticationExpiredError("登录状态已失效，请重新运行并登录")
+        if response.status_code in {401, 403} or 300 <= response.status_code < 400:
+            self.mutation_coordinator.cancel(authentication_failed=True)
+            raise AuthenticationExpiredError("登录状态已失效或接口发生跳转，请重新运行并登录")
         if response.status_code >= 400:
-            excerpt = safe_excerpt(response.text)
-            detail = f"：{excerpt}" if excerpt else ""
-            raise ApiError(f"{endpoint_name}失败（HTTP {response.status_code}）{detail}")
+            try:
+                error_payload = response.json()
+            except ValueError:
+                error_payload = None
+            if isinstance(error_payload, dict) and str(error_payload.get("code")) in {"401", "403"}:
+                self.mutation_coordinator.cancel(authentication_failed=True)
+                raise AuthenticationExpiredError("服务器报告登录状态已失效，请重新认证")
+            if method.upper() == "POST" and _is_lock_conflict(response.text):
+                raise LockConflictError(
+                    f"{endpoint_name}失败：服务器写入锁冲突（未自动重试），请稍后核对网页状态"
+                )
+            # Error pages may contain unknown secrets. Report status, not raw bodies.
+            raise ApiError(f"{endpoint_name}失败（HTTP {response.status_code}）")
 
         try:
             payload = response.json()
         except (requests.JSONDecodeError, json.JSONDecodeError, ValueError):
-            raise ResponseFormatError(
-                f"{endpoint_name}返回的不是有效 JSON：{safe_excerpt(response.text)}"
-            ) from None
+            raise ResponseFormatError(f"{endpoint_name}返回的不是有效 JSON") from None
         if not isinstance(payload, dict):
             raise ResponseFormatError(f"{endpoint_name}返回的 JSON 顶层不是对象")
 
         code = payload.get("code")
         success = payload.get("success")
         failed_code = code is not None and str(code) not in {"0", "200"}
+        message = self.redactor.excerpt(payload.get("message") or "服务器返回业务错误")
+        if str(code) in {"401", "403"}:
+            self.mutation_coordinator.cancel(authentication_failed=True)
+            raise AuthenticationExpiredError(f"登录状态已失效：{message}")
+        if method.upper() == "POST" and _is_lock_conflict(message):
+            raise LockConflictError(
+                f"{endpoint_name}失败：服务器写入锁冲突（未自动重试），请稍后核对网页状态"
+            )
         if success is False or failed_code:
-            message = safe_excerpt(payload.get("message") or "服务器返回业务错误")
-            if str(code) in {"401", "403"}:
-                raise AuthenticationExpiredError(f"登录状态已失效：{message}")
-            if method.upper() == "POST" and _is_lock_conflict(message):
-                raise LockConflictError(
-                    f"{endpoint_name}失败：服务器写入锁冲突（未自动重试），请稍后重试"
-                )
             raise ApiError(f"{endpoint_name}失败：{message}")
+        if success is not True or code is None:
+            raise ResponseFormatError(f"{endpoint_name}响应缺少有效 success/code")
         if require_result and "result" not in payload:
             raise ResponseFormatError(f"{endpoint_name}响应缺少 result 字段")
         return payload
 
-    def _vpn_params(self) -> dict[str, object]:
-        if not self.endpoints.requires_vpn_timestamp:
-            return {}
-        timestamp = self.session.cookies.get("vpn_timestamp")
-        return {"_t": timestamp} if timestamp else {}
-
     def list_courses(self) -> list[Course]:
         payload = self._request_json(
             "GET",
-            self.endpoints.courses,
+            self.api_base_url + "/jcedutec/courseSource/myCourseList",
             "获取课程列表",
             require_result=True,
-            params=self._vpn_params(),
         )
         raw_courses = payload.get("result")
         if raw_courses is None:
@@ -184,11 +183,10 @@ class LabPassClient(AbstractContextManager["LabPassClient"]):
         return list(unique.values())
 
     def list_questions(self, course_id: str) -> list[Question]:
-        params = self._vpn_params()
-        params["id"] = course_id
+        params = {"id": course_id}
         payload = self._request_json(
             "GET",
-            self.endpoints.questions,
+            self.api_base_url + "/jcedutec/courseSource/queryCourseQuestionRelaByMainId",
             "获取课程题目",
             require_result=True,
             params=params,
@@ -223,10 +221,10 @@ class LabPassClient(AbstractContextManager["LabPassClient"]):
         return questions
 
     def submit_answer(self, question: Question) -> None:
-        with self._mutation_coordinator.serialized():
+        with self.mutation_coordinator.serialized():
             self._request_json(
                 "POST",
-                self.endpoints.submit_answer,
+                self.api_base_url + "/jcedutec/courseSource/submitAnswer",
                 "提交题目答案",
                 require_result=False,
                 json={
@@ -237,10 +235,10 @@ class LabPassClient(AbstractContextManager["LabPassClient"]):
             )
 
     def finish_course(self, course_id: str) -> None:
-        with self._mutation_coordinator.serialized():
+        with self.mutation_coordinator.serialized():
             self._request_json(
                 "POST",
-                self.endpoints.finish_course,
+                self.api_base_url + "/jcedutec/courseSource/finish",
                 "标记课程完成",
                 require_result=False,
                 json={"id": course_id},
