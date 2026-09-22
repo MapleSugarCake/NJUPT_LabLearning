@@ -1,4 +1,11 @@
-"""Optional, temporary Edge login with narrowly scoped response capture."""
+"""通过临时 Edge 上下文获取并验证实验室认证材料。
+
+本文件定义：
+    matches_validation_response：判断响应是否准确匹配当前网络的实验室票据校验接口。
+    _captured_token：从候选响应的成功 JSON 中取得资源 Token。
+    _cookie_jar：将浏览器 Cookie 数据转换为独立的 requests CookieJar。
+    authenticate_in_browser：由用户在临时 Edge 中登录，再交接验证后的资源会话。
+"""
 
 import time
 from contextlib import suppress
@@ -22,8 +29,14 @@ from .models import AuthenticationResult, NetworkEnvironment
 from .redaction import Redactor
 
 
+# 作用：判断响应是否准确匹配当前网络的实验室票据校验接口。
+# 参数：
+#     response：本次浏览器上下文收到的响应对象，提供地址、请求方法和状态。
+#     environment：用户明确选择的校园网或校外 VPN 环境。
+# 返回：GET、HTTP 200、目标地址、service 和非空唯一票据均匹配时为 True。
+# 说明：门户响应、错误端口、错误路径或其他 service 均不作为资源认证来源。
 def matches_validation_response(response: Any, environment: NetworkEnvironment) -> bool:
-    """Only accept the selected lab endpoint and service, never portal responses."""
+    """判断响应是否准确匹配当前网络的实验室票据校验接口。"""
     target = urlsplit(response.url)
     expected = urlsplit(api_base(environment) + VALIDATE_PATH)
     query = parse_qs(target.query)
@@ -38,6 +51,12 @@ def matches_validation_response(response: Any, environment: NetworkEnvironment) 
     )
 
 
+# 作用：从候选响应的成功 JSON 中取得资源 Token。
+# 参数：
+#     response：本次浏览器上下文收到的响应对象，提供地址、请求方法和状态。
+#     redactor：用于登记认证材料和过滤诊断的脱敏上下文。
+# 返回：非空 Token 字符串；JSON、业务状态或 Token 无效时返回 None。
+# 说明：有效 Token 与地址中的票据一并登记脱敏；仅解析材料，权限验证由交接流程完成。
 def _captured_token(response: Any, redactor: Redactor) -> str | None:
     try:
         payload = response.json()
@@ -55,6 +74,11 @@ def _captured_token(response: Any, redactor: Redactor) -> str | None:
     return token
 
 
+# 作用：将浏览器 Cookie 数据转换为独立的 requests CookieJar。
+# 参数：
+#     items：浏览器提供的 Cookie 字典列表，包含名称、值、作用域和过期信息。
+# 返回：保留域、路径、安全标记及扩展属性的新 CookieJar。
+# 说明：正数过期时间转为整数；会话 Cookie 保留为无固定过期时间。
 def _cookie_jar(items: list[dict[str, Any]]) -> requests.cookies.RequestsCookieJar:
     jar = requests.cookies.RequestsCookieJar()
     for item in items:
@@ -73,12 +97,20 @@ def _cookie_jar(items: list[dict[str, Any]]) -> requests.cookies.RequestsCookieJ
     return jar
 
 
+# 作用：由用户在临时 Edge 中登录，再交接验证后的资源会话。
+# 参数：
+#     environment：用户明确选择的校园网或校外 VPN 环境。
+#     redactor：可复用的脱敏上下文；未传入时新建。 默认值为 None。
+# 返回：通过 requests 只读权限探测的 AuthenticationResult。
+# 说明：按需导入 Playwright，使用本机 Edge 和非持久化上下文，最长等待 5 分钟。
+# 说明：只观察当前上下文响应，复制资源 Cookie 与用户代理；不读取日常配置或保存认证材料。
+# 说明：成功、取消或失败时均尝试关闭浏览器；依赖、驱动、关闭窗口及超时错误转为安全认证异常。
 def authenticate_in_browser(
     *,
     environment: NetworkEnvironment,
     redactor: Redactor | None = None,
 ) -> AuthenticationResult:
-    """Let the user log in in temporary Edge; return a verified requests.Session."""
+    """由用户在临时 Edge 中登录，再交接验证后的资源会话。"""
     environment = NetworkEnvironment(environment)
     redactor = redactor if redactor is not None else Redactor()
     try:
@@ -96,6 +128,11 @@ def authenticate_in_browser(
                 captured: list[Any] = []
                 vpn_ready = False
 
+                # 作用：收集实验室校验响应并记录 VPN 回调是否完成。
+                # 参数：
+                #     response：本次浏览器上下文收到的响应对象，提供地址、请求方法和状态。
+                # 返回：无返回值（None）；更新外层候选响应队列和 VPN 就绪标记。
+                # 说明：回调只在当前临时上下文内注册；VPN 回调成功后允许重新访问实验室入口。
                 def observe(response: Any) -> None:
                     nonlocal vpn_ready
                     if matches_validation_response(response, environment):
@@ -142,7 +179,7 @@ def authenticate_in_browser(
                 with suppress(PlaywrightError):
                     browser.close()
     except PlaywrightError:
-        # Playwright exceptions can include complete URLs and network headers.
+        # Playwright 异常可能含有完整地址和请求头，因此只向外提供安全的固定说明。
         raise BrowserUnavailableError(
             "浏览器操作未完成，请确认已安装 Edge，或选择其他登录方式"
         ) from None

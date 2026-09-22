@@ -1,3 +1,25 @@
+"""使用虚构协议响应验证账号密码认证和 Token 导入。
+
+本文件定义：
+    auth_server：根据请求路径模拟统一认证、VPN 和实验室认证服务。
+    test_password_auth_complete_chain_and_ownership：
+        验证校内外完整认证顺序、动态应用选择和资源所有权。
+    test_auth_failures_close_all_sessions：逐类注入认证失败并检查所有已创建会话关闭。
+    test_import_token_probes_and_is_intranet_only：
+        验证导入 Token 去除空白、仅使用内网基址并探测权限。
+    test_token_probe_requires_complete_success_response：
+        拒绝缺少成功标记或有效权限列表的 Token 探测响应。
+    test_unapproved_redirect_is_rejected_without_request：
+        验证恶意主机或非获准路径不会收到后续认证请求。
+    test_redirect_limit：验证认证重定向最多接受十次跳转。
+    test_redirect_cycle_never_revisits_ticket_url：验证相同票据地址的循环跳转不会再次消费票据。
+    test_token_exchange_timeout_has_uncertain_result_and_no_retry：
+        验证资源 Token 交换超时被标为结果不确定且不重试。
+    test_service_and_ticket_parsing_do_not_accept_ambiguous_values：
+        验证片段中的 service、票据编码和非法服务参数解析。
+    test_auth_errors_redact_known_values：验证认证错误不会暴露登记过的秘密值。
+"""
+
 import json
 from urllib.parse import parse_qs, urlencode, urlsplit
 
@@ -24,8 +46,15 @@ from njupt_auth.redaction import Redactor
 from njupt_auth.transport import HttpSession
 
 
+# 作用：根据请求路径模拟统一认证、VPN 和实验室认证服务。
+# 参数：
+#     session：模拟请求关联的会话，可用来设置虚构 Cookie。
+#     request：准备好的请求对象，用于检查认证地址、请求头及载荷。
+#     kwargs：传输入口收到的请求选项，由模拟处理器接收。
+# 返回：对应认证阶段的内存 Response。
+# 说明：只使用虚构的账号、Token、票据及应用标识；断言门户材料不会作为资源认证头使用。
 def auth_server(session, request, kwargs):
-    """Synthetic protocol fixture based on report shapes, not copied HAR values."""
+    """根据请求路径模拟统一认证、VPN 和实验室认证服务。"""
     url, method = request.url, request.method
     parsed = urlsplit(url)
     query = parse_qs(parsed.query)
@@ -76,6 +105,13 @@ def auth_server(session, request, kwargs):
     return make_response(text="synthetic authenticated landing page")
 
 
+# 作用：验证校内外完整认证顺序、动态应用选择和资源所有权。
+# 参数：
+#     install_transport：离线传输安装夹具，用模拟处理器替换网络发送并记录调用。
+#     environment：参数化选择的校园网或校外 VPN 环境。
+# 返回：无返回值（None）；测试函数通过断言验证预期。
+# 说明：断言账号密码提交次数、加密载荷、引导会话关闭以及主会话与副本独立；结果关闭后工厂不可继续使
+#     用。
 @pytest.mark.parametrize("environment", list(NetworkEnvironment))
 def test_password_auth_complete_chain_and_ownership(install_transport, environment):
     calls = install_transport(auth_server)
@@ -104,6 +140,12 @@ def test_password_auth_complete_chain_and_ownership(install_transport, environme
     assert "fake-lab-token" not in repr(result)
 
 
+# 作用：逐类注入认证失败并检查所有已创建会话关闭。
+# 参数：
+#     install_transport：离线传输安装夹具，用模拟处理器替换网络发送并记录调用。
+#     fault：参数化故障类型，覆盖缺少 Token、非法 JSON、权限失败、标识缺失及 POST 超时。
+# 返回：无返回值（None）；测试函数通过断言验证预期。
+# 说明：POST 超时场景另断言凭据仅发送一次。
 @pytest.mark.parametrize(
     "fault",
     [
@@ -116,6 +158,13 @@ def test_password_auth_complete_chain_and_ownership(install_transport, environme
     ],
 )
 def test_auth_failures_close_all_sessions(install_transport, fault):
+    # 作用：在选定认证阶段替换响应或抛出超时异常。
+    # 参数：
+    #     session：模拟请求关联的会话，可用来设置虚构 Cookie。
+    #     request：准备好的请求对象，用于检查认证地址、请求头及载荷。
+    #     kwargs：传输入口收到的请求选项，由模拟处理器接收。
+    # 返回：对应故障的模拟响应，或正常 auth_server 响应。
+    # 说明：闭包读取 fault；POST 超时直接抛出 requests.Timeout。
     def handler(session, request, kwargs):
         path = urlsplit(request.url).path
         if fault == "missing_service" and "/user-login/" in path:
@@ -143,6 +192,11 @@ def test_auth_failures_close_all_sessions(install_transport, fault):
         assert sum(request.method == "POST" for _, request, _ in calls) == 1
 
 
+# 作用：验证导入 Token 去除空白、仅使用内网基址并探测权限。
+# 参数：
+#     install_transport：离线传输安装夹具，用模拟处理器替换网络发送并记录调用。
+# 返回：无返回值（None）；测试函数通过断言验证预期。
+# 说明：断言资源 Token、来源头和单次探测请求，退出上下文后主会话关闭。
 def test_import_token_probes_and_is_intranet_only(install_transport):
     calls = install_transport(lambda *args: make_response(success({"menu": []}, code=0)))
     with import_token("  fake-import-token  ") as result:
@@ -152,6 +206,12 @@ def test_import_token_probes_and_is_intranet_only(install_transport):
     assert len(calls) == 1
 
 
+# 作用：拒绝缺少成功标记或有效权限列表的 Token 探测响应。
+# 参数：
+#     install_transport：离线传输安装夹具，用模拟处理器替换网络发送并记录调用。
+#     body：参数化的缺字段或类型错误的模拟 JSON。
+# 返回：无返回值（None）；测试函数通过断言验证预期。
+# 说明：预期 AuthError，且探测失败的资源会话已关闭。
 @pytest.mark.parametrize(
     "body", [success({}), success({"menu": "bad"}), {"code": 200, "result": {"menu": []}}]
 )
@@ -162,6 +222,12 @@ def test_token_probe_requires_complete_success_response(install_transport, body)
     assert calls[0][0].closed
 
 
+# 作用：验证恶意主机或非获准路径不会收到后续认证请求。
+# 参数：
+#     install_transport：离线传输安装夹具，用模拟处理器替换网络发送并记录调用。
+#     url：参数化的未获准跳转目标。
+# 返回：无返回值（None）；测试函数通过断言验证预期。
+# 说明：仅发送初始请求，目标在发送前被 AuthProtocolError 拒绝。
 @pytest.mark.parametrize(
     "url",
     [
@@ -177,6 +243,11 @@ def test_unapproved_redirect_is_rejected_without_request(install_transport, url)
     assert len(calls) == 1
 
 
+# 作用：验证认证重定向最多接受十次跳转。
+# 参数：
+#     install_transport：离线传输安装夹具，用模拟处理器替换网络发送并记录调用。
+# 返回：无返回值（None）；测试函数通过断言验证预期。
+# 说明：模拟持续变化的跳转地址，断言初始请求加十次跳转共发送 11 次。
 def test_redirect_limit(install_transport):
     calls = install_transport(
         lambda *args: make_response(
@@ -188,6 +259,11 @@ def test_redirect_limit(install_transport):
     assert len(calls) == 11
 
 
+# 作用：验证相同票据地址的循环跳转不会再次消费票据。
+# 参数：
+#     install_transport：离线传输安装夹具，用模拟处理器替换网络发送并记录调用。
+# 返回：无返回值（None）；测试函数通过断言验证预期。
+# 说明：预期循环协议异常，模拟发送总数为一次。
 def test_redirect_cycle_never_revisits_ticket_url(install_transport):
     url = SERVICE_URL + "?ticket=fake-ticket"
     calls = install_transport(lambda *args: make_response(status=302, headers={"Location": url}))
@@ -196,7 +272,18 @@ def test_redirect_cycle_never_revisits_ticket_url(install_transport):
     assert len(calls) == 1
 
 
+# 作用：验证资源 Token 交换超时被标为结果不确定且不重试。
+# 参数：
+#     install_transport：离线传输安装夹具，用模拟处理器替换网络发送并记录调用。
+# 返回：无返回值（None）；测试函数通过断言验证预期。
+# 说明：断言只请求一次 validateLogin 地址。
 def test_token_exchange_timeout_has_uncertain_result_and_no_retry(install_transport):
+    # 作用：仅在资源票据交换阶段模拟读取超时。
+    # 参数：
+    #     session：模拟请求关联的会话，可用来设置虚构 Cookie。
+    #     request：准备好的请求对象，用于检查认证地址、请求头及载荷。
+    #     kwargs：传输入口收到的请求选项，由模拟处理器接收。
+    # 返回：其他阶段返回正常模拟认证响应；交换阶段抛出 ReadTimeout。
     def handler(session, request, kwargs):
         if urlsplit(request.url).path.endswith(VALIDATE_PATH):
             raise requests.ReadTimeout("synthetic timeout")
@@ -210,6 +297,10 @@ def test_token_exchange_timeout_has_uncertain_result_and_no_retry(install_transp
     assert sum(VALIDATE_PATH in request.url for _, request, _ in calls) == 1
 
 
+# 作用：验证片段中的 service、票据编码和非法服务参数解析。
+# 参数：无。
+# 返回：无返回值（None）；测试函数通过断言验证预期。
+# 说明：有效值应正确提取；缺失、重复或把地址当作服务标识的输入应被拒绝。
 def test_service_and_ticket_parsing_do_not_accept_ambiguous_values():
     assert _service_id(SSO_BASE + "/user-login/#/login?service=fake-service") == "fake-service"
     assert _ticket(SERVICE_URL + "?" + urlencode({"ticket": "fake-ticket"})) == "fake-ticket"
@@ -222,6 +313,11 @@ def test_service_and_ticket_parsing_do_not_accept_ambiguous_values():
             _service_id(url)
 
 
+# 作用：验证认证错误不会暴露登记过的秘密值。
+# 参数：
+#     install_transport：离线传输安装夹具，用模拟处理器替换网络发送并记录调用。
+# 返回：无返回值（None）；测试函数通过断言验证预期。
+# 说明：把虚构 Token 放入错误消息，断言用户可见异常已脱敏且请求只发送一次。
 def test_auth_errors_redact_known_values(install_transport):
     calls = install_transport(
         lambda *args: make_response(

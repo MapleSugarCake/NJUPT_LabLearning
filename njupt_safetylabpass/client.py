@@ -1,4 +1,24 @@
-"""Validated, thread-clonable client for the Lab Learning business API."""
+"""校验课程 API 响应、转换领域模型并串行提交业务写入。
+
+本文件定义：
+    logger：课程 API 请求和解析过程的模块日志记录器。
+    SafetyLabClient：使用已认证会话访问课程资源，并可为课程任务复制客户端。
+    SafetyLabClient.__init__：保存认证资源和业务写入协调器。
+    SafetyLabClient.__enter__：进入客户端上下文并提供当前实例。
+    SafetyLabClient.__exit__：退出客户端上下文时关闭拥有的会话。
+    SafetyLabClient.close：关闭当前客户端拥有的资源会话。
+    SafetyLabClient.clone：为单门课程创建使用独立会话的客户端。
+    SafetyLabClient._request_json：发送业务请求并统一校验 HTTP、认证状态及 JSON 外层结构。
+    SafetyLabClient.list_courses：读取课程列表并规范化字段与重复记录。
+    SafetyLabClient.list_questions：读取题目并保留提交标识、来源标识及答案的独立语义。
+    SafetyLabClient.submit_answer：在共享写入锁内提交一条完整题目的答案。
+    SafetyLabClient.finish_course：在共享写入锁内按课程列表标识标记完成。
+    _first_text：按候选键顺序取得第一个非空文本值。
+    _required_text：提取必须存在且非空的题目标识字段。
+    _normalize_answer：校验答案类型并按逗号规则规范化提交内容。
+    _is_lock_conflict：兼容识别服务端两种写入锁冲突拼写。
+    _is_finished：将课程完成标记转换为布尔值。
+"""
 
 import json
 import logging
@@ -23,12 +43,26 @@ from .exceptions import (
 )
 from .models import Course, Question
 
+# 课程 API 请求和解析过程的模块日志记录器。
+# 记录接口阶段、耗时和安全诊断，由 CLI 的运行级脱敏出口处理。
 logger = logging.getLogger(__name__)
 
 
+# 作用：使用已认证会话访问课程资源，并可为课程任务复制客户端。
+# 说明：继承 AbstractContextManager；当前实例拥有传入会话，关闭时只释放该会话。
+# 说明：副本拥有独立会话，但共享认证快照工厂和运行级 MutationCoordinator；本类不负责登录。
 class SafetyLabClient(AbstractContextManager["SafetyLabClient"]):
-    """API client whose authenticated state can be cloned into worker Sessions."""
+    """使用已认证会话访问课程资源，并可为课程任务复制客户端。"""
 
+    # 作用：保存认证资源和业务写入协调器。
+    # 参数：
+    #     self：当前实例。
+    #     session：归当前客户端管理的已认证 requests 会话。
+    #     api_base_url：实验室资源 API 基址，保存时去除尾斜杠。
+    #     session_factory：用于创建独立已认证会话的可调用对象。
+    #     mutation_coordinator：本轮所有客户端共享的写入锁与取消协调器。
+    # 返回：无返回值（None）。
+    # 说明：复用会话上的脱敏上下文；会话未提供时使用新的 Redactor。
     def __init__(
         self,
         session: requests.Session,
@@ -43,17 +77,36 @@ class SafetyLabClient(AbstractContextManager["SafetyLabClient"]):
         self._session_factory = session_factory
         self.mutation_coordinator = mutation_coordinator
 
+    # 作用：进入客户端上下文并提供当前实例。
+    # 参数：
+    #     self：当前实例。
+    # 返回：当前 SafetyLabClient 实例。
     def __enter__(self) -> Self:
         return self
 
+    # 作用：退出客户端上下文时关闭拥有的会话。
+    # 参数：
+    #     self：当前实例。
+    #     *_：上下文协议传入的异常信息，本方法只执行资源清理。
+    # 返回：None，不抑制上下文内的异常。
     def __exit__(self, *_: object) -> None:
         self.close()
 
+    # 作用：关闭当前客户端拥有的资源会话。
+    # 参数：
+    #     self：当前实例。
+    # 返回：无返回值（None）。
+    # 说明：认证快照工厂由本轮认证结果在所有线程结束后统一关闭。
     def close(self) -> None:
         self.session.close()
 
+    # 作用：为单门课程创建使用独立会话的客户端。
+    # 参数：
+    #     self：当前实例。
+    # 返回：共享基址、会话工厂及写入协调器的新 SafetyLabClient。
+    # 说明：新客户端由课程任务关闭；工厂已关闭等创建异常由调用方处理。
     def clone(self) -> "SafetyLabClient":
-        """Create an independent Session with a snapshot of authentication state."""
+        """为单门课程创建使用独立会话的客户端。"""
 
         session = self._session_factory()
         return SafetyLabClient(
@@ -63,6 +116,19 @@ class SafetyLabClient(AbstractContextManager["SafetyLabClient"]):
             mutation_coordinator=self.mutation_coordinator,
         )
 
+    # 作用：发送业务请求并统一校验 HTTP、认证状态及 JSON 外层结构。
+    # 参数：
+    #     self：当前实例。
+    #     method：HTTP 请求方法，决定网络故障和锁错误的分类。
+    #     url：待访问的完整资源接口地址。
+    #     endpoint_name：用于日志和错误说明的安全接口名称。
+    #     require_result：是否要求 JSON 外层存在 result 键，不在此处校验其具体类型。
+    #     **kwargs：透传给会话的查询参数、请求体等请求选项。
+    # 返回：通过校验的完整 JSON 字典。
+    # 说明：请求前检查取消，明确设置超时并禁止自动跳转；写入互斥由上层业务方法取得。
+    # 说明：HTTP 或业务认证失效会取消整轮；写入超时、连接中断报告结果不确定，其他格式与业务错误分
+    #     别抛出。
+    # 说明：只输出脱敏且有界的服务端 message；原始错误页不写入异常。
     def _request_json(
         self,
         method: str,
@@ -116,7 +182,7 @@ class SafetyLabClient(AbstractContextManager["SafetyLabClient"]):
                 raise LockConflictError(
                     f"{endpoint_name}失败：服务器写入锁冲突（未自动重试），请稍后核对网页状态"
                 )
-            # Error pages may contain unknown secrets. Report status, not raw bodies.
+            # 错误页可能含有尚未登记的敏感值，因此只报告状态码，不输出原始正文。
             raise ApiError(f"{endpoint_name}失败（HTTP {response.status_code}）")
 
         try:
@@ -145,6 +211,12 @@ class SafetyLabClient(AbstractContextManager["SafetyLabClient"]):
             raise ResponseFormatError(f"{endpoint_name}响应缺少 result 字段")
         return payload
 
+    # 作用：读取课程列表并规范化字段与重复记录。
+    # 参数：
+    #     self：当前实例。
+    # 返回：按首次出现顺序排列、按课程标识去重的 Course 列表。
+    # 说明：空 result 视为空列表；同标识记录优先保留未完成项，名称缺失时生成课程占位名称。
+    # 说明：列表结构、条目类型或课程标识无效时抛出 ResponseFormatError。
     def list_courses(self) -> list[Course]:
         payload = self._request_json(
             "GET",
@@ -182,6 +254,13 @@ class SafetyLabClient(AbstractContextManager["SafetyLabClient"]):
                 logger.debug("忽略重复课程记录：%s", course_id)
         return list(unique.values())
 
+    # 作用：读取题目并保留提交标识、来源标识及答案的独立语义。
+    # 参数：
+    #     self：当前实例。
+    #     course_id：课程列表中的课程标识，用于查询题目或标记课程完成。
+    # 返回：与服务端返回顺序一致的 Question 列表，空 result 返回空列表。
+    # 说明：提交标识取响应 id，所属课程取 courseId，题库来源取 questionId；
+    #     答案交由规范化函数校验。
     def list_questions(self, course_id: str) -> list[Question]:
         params = {"id": course_id}
         payload = self._request_json(
@@ -220,6 +299,14 @@ class SafetyLabClient(AbstractContextManager["SafetyLabClient"]):
         )
         return questions
 
+    # 作用：在共享写入锁内提交一条完整题目的答案。
+    # 参数：
+    #     self：当前实例。
+    #     question：完整 Question，提供 submission_id、course_id 和规范化答案。
+    # 返回：提交成功时返回 None。
+    # 说明：载荷 questionId 取 submission_id，id 取 course_id，option 取 answer；不使用题库来源标
+    #     识。
+    # 说明：取得锁后检查取消，失败 POST 不自动重发，异常交给单课程流程处理。
     def submit_answer(self, question: Question) -> None:
         with self.mutation_coordinator.serialized():
             self._request_json(
@@ -234,6 +321,12 @@ class SafetyLabClient(AbstractContextManager["SafetyLabClient"]):
                 },
             )
 
+    # 作用：在共享写入锁内按课程列表标识标记完成。
+    # 参数：
+    #     self：当前实例。
+    #     course_id：课程列表中的课程标识，用于查询题目或标记课程完成。
+    # 返回：标记成功时返回 None。
+    # 说明：载荷仅包含课程列表 id；取得锁后再次检查取消，并遵守 POST 不重放的约束。
     def finish_course(self, course_id: str) -> None:
         with self.mutation_coordinator.serialized():
             self._request_json(
@@ -245,6 +338,11 @@ class SafetyLabClient(AbstractContextManager["SafetyLabClient"]):
             )
 
 
+# 作用：按候选键顺序取得第一个非空文本值。
+# 参数：
+#     item：当前待解析的服务端字段字典。
+#     *keys：任意数量的候选字段名，按传入顺序作为优先级。
+# 返回：去除两侧空白后的字符串，全部缺失或为空时返回 None。
 def _first_text(item: dict[str, Any], *keys: str) -> str | None:
     for key in keys:
         value = item.get(key)
@@ -253,6 +351,13 @@ def _first_text(item: dict[str, Any], *keys: str) -> str | None:
     return None
 
 
+# 作用：提取必须存在且非空的题目标识字段。
+# 参数：
+#     item：当前待解析的服务端字段字典。
+#     key：必填字段名，用于读取数据及构造错误说明。
+#     index：从 1 开始的题目序号，仅用于格式错误说明。
+# 返回：转换为字符串并去除两侧空白的字段值。
+# 说明：字段缺失或为空时抛出带题目序号的 ResponseFormatError。
 def _required_text(item: dict[str, Any], key: str, index: int) -> str:
     value = item.get(key)
     if value is None or not str(value).strip():
@@ -260,6 +365,13 @@ def _required_text(item: dict[str, Any], key: str, index: int) -> str:
     return str(value).strip()
 
 
+# 作用：校验答案类型并按逗号规则规范化提交内容。
+# 参数：
+#     value：服务端 correctAnswer 原值，可为字符串或字符串列表。
+#     index：从 1 开始的题目序号，仅用于格式错误说明。
+# 返回：无逗号的字符串，或已清理空白的字符串列表。
+# 说明：只有含逗号的字符串才拆分，AB 保持原样；列表必须非空且每项均为非空字符串。
+# 说明：缺失、空选项及不支持类型均抛出 ResponseFormatError。
 def _normalize_answer(value: object, index: int) -> str | list[str]:
     if isinstance(value, str):
         answer = value.strip()
@@ -287,11 +399,19 @@ def _normalize_answer(value: object, index: int) -> str | list[str]:
     raise ResponseFormatError(f"第 {index} 道题目的 correctAnswer 类型无效")
 
 
+# 作用：兼容识别服务端两种写入锁冲突拼写。
+# 参数：
+#     message：待检查的服务端错误文本，比较时忽略字母大小写。
+# 返回：包含 acquire lock fail 或 aquire lock fail 时为 True。
 def _is_lock_conflict(message: str) -> bool:
     normalized = message.casefold()
     return "acquire lock fail" in normalized or "aquire lock fail" in normalized
 
 
+# 作用：将课程完成标记转换为布尔值。
+# 参数：
+#     value：服务端 isFinish 原始值，字符串先去除两侧空白并转为小写。
+# 返回：字符串 1、true、yes 或布尔真、等于数字 1 的值返回 True。
 def _is_finished(value: object) -> bool:
     if isinstance(value, str):
         return value.strip().lower() in {"1", "true", "yes"}

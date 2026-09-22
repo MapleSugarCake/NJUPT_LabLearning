@@ -1,6 +1,6 @@
 [project]
 name = "labpass"
-version = "1.0.2"
+version = "2.0.0"
 description = "NJUPT laboratory safety course helper with bounded concurrency"
 readme = "README.md"
 requires-python = ">=3.13"

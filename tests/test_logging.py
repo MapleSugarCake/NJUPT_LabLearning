@@ -1,3 +1,17 @@
+"""在独立临时目录验证日志开关、路径、独占创建和脱敏。
+
+本文件定义：
+    test_debug_controls_both_outputs_and_redacts_tracebacks：
+        验证调试开关控制双出口及完整异常堆栈脱敏。
+    test_existing_file_untouched_and_disabled_logging_ignores_it：
+        验证同名文件不能覆盖，关闭调试时也不改动已有文件。
+    test_log_directory_source_and_exe：验证源码使用工作目录而 EXE 使用可执行文件目录。
+    test_structured_redaction_includes_tgc_and_full_student_number：
+        验证结构化密码、Cookie、票据、网关凭据和学号都被遮盖。
+    test_safe_excerpt_redacts_before_truncation_and_flattens_lines：
+        验证先脱敏再截断，并把多行诊断合并为单行。
+"""
+
 import io
 import logging
 import re
@@ -9,6 +23,13 @@ from labpass_cli.logging_utils import configure_logging, log_path
 from njupt_auth.redaction import Redactor, safe_excerpt
 
 
+# 作用：验证调试开关控制双出口及完整异常堆栈脱敏。
+# 参数：
+#     tmp_path：pytest 提供的独立临时目录，用于隔离文件操作。
+#     monkeypatch：pytest 替换夹具，用于临时替换对象或环境，测试结束后自动恢复。
+#     debug：参数化的调试日志开关，分别检查开启与关闭行为。
+# 返回：无返回值（None）；测试函数通过断言验证预期。
+# 说明：断言开启时文件与控制台一致且含时间，关闭时无文件或调试消息；退出后处理器已移除。
 @pytest.mark.parametrize("debug", [True, False])
 def test_debug_controls_both_outputs_and_redacts_tracebacks(tmp_path, monkeypatch, debug):
     monkeypatch.chdir(tmp_path)
@@ -50,6 +71,12 @@ def test_debug_controls_both_outputs_and_redacts_tracebacks(tmp_path, monkeypatc
     assert not logging.getLogger("njupt_auth").handlers
 
 
+# 作用：验证同名文件不能覆盖，关闭调试时也不改动已有文件。
+# 参数：
+#     tmp_path：pytest 提供的独立临时目录，用于隔离文件操作。
+#     monkeypatch：pytest 替换夹具，用于临时替换对象或环境，测试结束后自动恢复。
+# 返回：无返回值（None）；测试函数通过断言验证预期。
+# 说明：预先写入固定内容；开启时应独占创建失败，关闭时保留原内容。
 def test_existing_file_untouched_and_disabled_logging_ignores_it(tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
     path = tmp_path / "labpass_log.txt"
@@ -61,6 +88,12 @@ def test_existing_file_untouched_and_disabled_logging_ignores_it(tmp_path, monke
     assert path.read_text(encoding="utf-8") == "original content"
 
 
+# 作用：验证源码使用工作目录而 EXE 使用可执行文件目录。
+# 参数：
+#     tmp_path：pytest 提供的独立临时目录，用于隔离文件操作。
+#     monkeypatch：pytest 替换夹具，用于临时替换对象或环境，测试结束后自动恢复。
+# 返回：无返回值（None）；测试函数通过断言验证预期。
+# 说明：模拟冻结标记、可执行文件及解压目录，确保解压目录不会成为日志位置。
 def test_log_directory_source_and_exe(tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
     assert log_path() == tmp_path / "labpass_log.txt"
@@ -71,6 +104,11 @@ def test_log_directory_source_and_exe(tmp_path, monkeypatch):
     assert log_path() == executable.parent / "labpass_log.txt"
 
 
+# 作用：验证结构化密码、Cookie、票据、网关凭据和学号都被遮盖。
+# 参数：
+#     message：参数化的虚构敏感信息文本，涵盖键值、JSON 形态和认证头。
+#     secrets：当前文本中必须完全消失的虚构秘密值列表。
+# 返回：无返回值（None）；测试函数通过断言验证预期。
 @pytest.mark.parametrize(
     "message,secrets",
     [
@@ -95,6 +133,10 @@ def test_structured_redaction_includes_tgc_and_full_student_number(message, secr
     assert all(secret not in result for secret in secrets)
 
 
+# 作用：验证先脱敏再截断，并把多行诊断合并为单行。
+# 参数：无。
+# 返回：无返回值（None）；测试函数通过断言验证预期。
+# 说明：使用 URL 编码的虚构秘密值和超长正文，检查固定遮盖前缀、最大摘要长度及无换行。
 def test_safe_excerpt_redacts_before_truncation_and_flattens_lines():
     redactor = Redactor()
     redactor.remember("secret+with/slash")

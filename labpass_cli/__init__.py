@@ -1,1 +1,8 @@
-"""Interactive console application and course scheduling for LabPass."""
+"""标识 LabPass 控制台应用包。
+
+交互入口、运行设置、日志、课程线程调度及汇总分别由各子模块提供。
+包初始化不执行输入、认证或课程业务，也不设置公开导出列表。
+
+本文件定义：
+    无自行定义的函数、类或模块变量。
+"""
