@@ -42,7 +42,7 @@ def _yes_no(prompt: str, input_fn: Input, output_fn: Output) -> bool:
 
 
 def _settings(input_fn: Input, output_fn: Output) -> RunSettings:
-    if not _yes_no("是否自定义设置？[y/N]：", input_fn, output_fn):
+    if not _yes_no("是否自定义设置？默认请选N[y/N]：", input_fn, output_fn):
         return RunSettings()
     debug = _yes_no("是否开启 debug 日志？[y/N]：", input_fn, output_fn)
     while True:
@@ -70,7 +70,7 @@ def _authenticate(
     redactor: Redactor,
 ) -> AuthenticationResult:
     username = input_fn("请输入学号：").strip()
-    password = input_fn("请输入密码（明文显示）：")
+    password = input_fn("请输入密码：")
     redactor.remember(username, password)
     try:
         return authenticate(username, password, environment=environment, redactor=redactor)
@@ -81,7 +81,7 @@ def _authenticate(
         password = ""  # noqa: F841 - release this reference, without claiming memory erasure.
 
     while True:
-        choice = input_fn("登录回退 [1 浏览器 / 2 校园网 Token / 0 退出（默认）]：").strip()
+        choice = input_fn("登录回退 [1 浏览器 / 2 手动 Token / 0 退出（默认）]：").strip()
         if choice in {"", "0"}:
             raise AuthError("用户未完成登录")
         try:
