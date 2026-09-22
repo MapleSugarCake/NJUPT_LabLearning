@@ -1,4 +1,5 @@
 import io
+import runpy
 import sys
 import tomllib
 from pathlib import Path
@@ -38,6 +39,17 @@ def fake_auth_result():
         base, "fake-token", requests.cookies.RequestsCookieJar(), via_vpn=False, redactor=Redactor()
     )
     return AuthenticationResult(factory(), base, factory)
+
+
+def test_source_entrypoint_version_first_and_eof_before_network(monkeypatch, capsys):
+    events = []
+    monkeypatch.setattr("builtins.input", Inputs([], events))
+    main = Path(__file__).resolve().parents[1] / "main.py"
+    with pytest.raises(SystemExit) as exit_info:
+        runpy.run_path(str(main), run_name="__main__")
+    assert exit_info.value.code == 2
+    assert capsys.readouterr().out.splitlines()[0] == "LabPass " + get_version()
+    assert events == ["是否自定义设置？[y/N]："]
 
 
 def test_version_and_first_prompt_then_default_settings(monkeypatch, tmp_path):

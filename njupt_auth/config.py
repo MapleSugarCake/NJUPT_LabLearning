@@ -15,6 +15,7 @@ VPN_PRELOGIN_URL = (
     "students/students"
 )
 VPN_CALLBACK = f"{VPN_ORIGIN}/enlink/api/client/callback/cas"
+VPN_AUTHORIZATION = f"{VPN_ORIGIN}/engateway/api/sso/authorized"
 VPN_API_BASE = (
     f"{VPN_ORIGIN}/http/"
     "webvpnc01f87dbae47c6e4069a3da910c73ebdc0a307b03b8b6cbdba61b1f29c7dbb41/"

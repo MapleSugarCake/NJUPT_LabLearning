@@ -6,7 +6,7 @@ import threading
 from urllib.parse import quote, quote_plus
 
 _KEYS = (
-    r"password|passwd|x-access-token|access[-_]token|authorization|token|ticket|"
+    r"password|passwd|x-access-token|access[-_]token|authorization|token|entoken|ticket|"
     r"cookie|set-cookie|tgc|jsessionid|enssessionid|guestsessionid|username|sessionid"
 )
 _FIELD = re.compile(

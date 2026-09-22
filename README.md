@@ -53,6 +53,12 @@ Windows 用户可以直接运行构建好的 `labpass.exe`。EXE 保持控制台
 
 所有方式都先读取实验室权限接口验证认证结果，再读取课程列表。身份门户 Token 与实验室资源 Token 不可混用。校外访问还依赖 VPN 会话，单独粘贴 Token 不能替代 VPN 上下文。
 
+账号密码链路逐跳校验重定向：仅将获准的身份站点 HTTP 登录/CAS 地址升级到 HTTPS，保留 service 和 ticket 参数；直连和 VPN 映射的实验室首页均接受有无尾斜杠两种形式。VPN 建链允许服务器设置适用于目标地址的 Cookie 后跳回同一 URL。同一授权阶段内，相同 URL 和实际发送 Cookie 均无变化时判为循环。
+
+VPN 回调后可能继续经过同源的 `/engateway/api/sso/authorized`。该接口首次以 HTTP 302 返回已验证的 VPN 入口后，允许进入新的授权阶段再次访问入口，即使 Cookie 值未变化；其他重定向不产生这一例外。总上限仍为 10 次重定向，不因授权进展重置。网关授权按端点和 `entoken` 防止重放，且只发送一次；ticket 消费、CAS granting 和资源 Token 交换也不因 Cookie 或授权阶段变化而重放。
+
+校外继续保留 VPN 预登录、统一认证、网关回调和映射 CAS 两阶段会话；各登录阶段分别按当前 service 查询应用配置，使用 `loginAppId or appId`。网关 Cookie、`enlink-vpn` 和适用的 `_t` 参数随原有链路传递，不使用参考抓包中的临时标识。
+
 浏览器兜底仅监听本次会话中准确匹配实验室 `validateLogin` 地址、请求方法和目标 service 的成功响应，从中取得资源 Token，复制适用于资源地址的 Cookie，并使用 `requests.Session` 进行只读鉴权。不会猜测 VPN 页面存储键，也不会将门户响应当成实验室认证结果。等待上限 5 分钟，关闭窗口、超时或 Edge 不可用时可以重新选择登录方式。
 
 手动 Token 获取步骤：
@@ -75,7 +81,7 @@ debug 开启时同时写入控制台和 UTF-8 文件 `labpass_log.txt`。日期�
 - 同名文件已存在：立即报错并退出，不覆盖、不追加。请自行移动或删除旧日志后再运行。
 - 目录不可写：报错并退出，不静默切换目录或关闭 debug。
 
-密码明文输入仅改变终端回显，不会把输入内容录入日志。日志、异常消息和调试堆栈会脱敏密码、Token、Cookie、`tgc`、CAS ticket、sessionId、完整学号及运行中登记的秘密值。程序不持久化认证信息；浏览器使用临时上下文，不保存认证状态、HAR、trace 或截图。提交日志前仍应检查个人信息。
+密码明文输入仅改变终端回显，不会把输入内容录入日志。日志、异常消息和调试堆栈会脱敏密码、Token、Cookie、`tgc`、网关 `entoken`、CAS ticket、sessionId、完整学号及运行中登记的秘密值。程序不持久化认证信息；浏览器使用临时上下文，不保存认证状态、HAR、trace 或截图。提交日志前仍应检查个人信息。
 
 ## 项目职责
 
@@ -141,6 +147,41 @@ EXE 位于 `dist/labpass.exe`。构建会包含由项目元数据生成的版本
 现有校外流程以维护者此前确认可用的实现为迁移基线。本次新增和重构的校内外 HTTP、浏览器能力，需要维护者使用本人账号分别进行真实环境验收；模拟测试、离线构建和 EXE 启动检查不能证明真实认证已成功。
 
 维护者应分别确认校内外登录、课程列表及状态、课程并发上限、单课程顺序和网页最终状态。自动测试、构建验证、真实账号测试必须分别记录，未执行的项目明确标为未验证。
+
+真实账号验收同时记录实际网络和所选认证链路。在校园网内选择 VPN 链路并通过权限探测，只证明该网络下的 VPN 链路可用，不能记为校外网络验收；校外验收必须实际切换到校外网络，并从全新认证会话开始。
+
+只验证账密认证时，不要运行完整 CLI：它会在登录后继续执行待处理课程。请在独立本机终端使用以下 PowerShell 命令，分别切换实际网络后验证。此入口只调用账号密码认证、主会话权限探测及独立会话权限探测；不会回退到浏览器，也不会提交课程请求。
+
+```powershell
+uv run python -c @'
+from njupt_auth import AuthError, NetworkEnvironment, authenticate, check_access
+from njupt_auth.redaction import Redactor
+
+choice = input("网络 [1 校外 VPN / 2 校园网]：").strip()
+if choice not in {"1", "2"}:
+    raise SystemExit("请输入 1 或 2 后重新运行")
+environment = NetworkEnvironment.EXTRANET if choice == "1" else NetworkEnvironment.INTRANET
+redactor = Redactor()
+username = password = ""
+try:
+    username = input("学号：").strip()
+    password = input("密码：")
+    redactor.remember(username, password)
+    with authenticate(username, password, environment=environment, redactor=redactor) as auth:
+        with auth.session_factory() as clone:
+            check_access(clone, auth.api_base_url, redactor=redactor)
+    print("账密认证、主会话与独立会话只读权限探测通过；会话已关闭")
+except AuthError as exc:
+    raise SystemExit(redactor.excerpt(exc)) from None
+except (EOFError, KeyboardInterrupt):
+    raise SystemExit("验收已取消") from None
+finally:
+    username = password = ""
+    redactor.clear()
+'@
+```
+
+密码依照项目约定明文回显，不能录屏、截图或采集该终端输入。凭据不得写进命令、脚本或环境变量。浏览器诊断使用另一个临时上下文，其成功不能替代这里的账密验收；网络不可用或需要人工交互时，应将对应分支标为待验收。
 
 ## 作者与反馈
 

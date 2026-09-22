@@ -81,6 +81,10 @@ def test_log_directory_source_and_exe(tmp_path, monkeypatch):
         ),
         ("{'tgc': 'fake-tgc', 'Cookie': 'one=abc; two=def'}", ["fake-tgc", "abc", "def"]),
         (
+            'https://example.test/?entoken=fake-gateway&next=page {"enToken": "fake other"}',
+            ["fake-gateway", "fake other"],
+        ),
+        (
             "Authorization: Bearer fake-bearer\nB2099123456 2099123456",
             ["fake-bearer", "B2099123456", "2099123456"],
         ),
