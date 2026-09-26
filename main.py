@@ -1,6 +1,6 @@
 """作为源码脚本和 Windows 可执行文件的启动入口。
 
-直接启动时输出当前脚本横幅，并调用导入的 labpass_cli.cli.entrypoint。
+直接启动时调用导入的 labpass_cli.cli.entrypoint。
 entrypoint 负责运行交互流程、处理可执行文件暂停并发出进程退出状态。
 本文件不定义登录、课程处理或参数解析逻辑。
 

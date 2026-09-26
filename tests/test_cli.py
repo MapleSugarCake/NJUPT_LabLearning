@@ -101,7 +101,7 @@ def test_source_entrypoint_version_first_and_eof_before_network(monkeypatch, cap
         runpy.run_path(str(main), run_name="__main__")
     assert exit_info.value.code == 2
     assert capsys.readouterr().out.splitlines()[0] == "LabPass " + get_version()
-    assert events == ["是否自定义设置？[y/N]："]
+    assert events == ["是否自定义设置？默认请选N[y/N]："]
 
 
 # 作用：验证版本与首提示顺序以及默认运行设置。
@@ -118,7 +118,7 @@ def test_version_and_first_prompt_then_default_settings(monkeypatch, tmp_path):
     inputs = Inputs(["n", ""], events)
     assert cli.run_cli(input_fn=inputs, output_fn=events.append) == 0
     assert events[0] == "LabPass " + get_version()
-    assert events[1].startswith("是否自定义设置？[y/N]")
+    assert events[1] == "是否自定义设置？默认请选N[y/N]："
     assert execute.call_args.args[0] == RunSettings()
     assert execute.call_args.kwargs["environment"] is NetworkEnvironment.EXTRANET
     assert not (tmp_path / "labpass_log.txt").exists()
@@ -134,7 +134,7 @@ def test_invalid_inputs_reprompt_and_custom_settings(monkeypatch, tmp_path):
     monkeypatch.chdir(tmp_path)
     execute = Mock(return_value=0)
     monkeypatch.setattr(cli, "execute", execute)
-    inputs = Inputs(["bad", "Y", "bad", "Y", "0", "5", "abc", "2", "bad", "2"])
+    inputs = Inputs(["bad", "Y", "bad", "Y", "0", "5", "abc", "2", "", "bad", "2"])
     assert cli.run_cli(input_fn=inputs, output_fn=lambda _: None, stream=io.StringIO()) == 0
     assert execute.call_args.args[0] == RunSettings(debug=True, workers=2)
     assert execute.call_args.kwargs["environment"] is NetworkEnvironment.INTRANET
@@ -154,7 +154,7 @@ def test_debug_log_conflict_fails_before_auth(monkeypatch, tmp_path):
     execute = Mock()
     monkeypatch.setattr(cli, "execute", execute)
     output = []
-    inputs = Inputs(["y", "y", ""])
+    inputs = Inputs(["y", "y", "", ""])
     assert cli.run_cli(input_fn=inputs, output_fn=output.append) == 2
     execute.assert_not_called()
     assert path.read_bytes() == b"existing-log"
@@ -172,7 +172,7 @@ def test_log_creation_error_fails_before_auth(monkeypatch, tmp_path):
     (tmp_path / "labpass_log.txt").mkdir()
     execute = Mock()
     monkeypatch.setattr(cli, "execute", execute)
-    assert cli.run_cli(input_fn=Inputs(["y", "y", ""]), output_fn=lambda _: None) == 2
+    assert cli.run_cli(input_fn=Inputs(["y", "y", "", ""]), output_fn=lambda _: None) == 2
     execute.assert_not_called()
 
 
@@ -254,11 +254,17 @@ def test_browser_failure_returns_to_fallback_choice(monkeypatch):
         ("failure", 1),
         ("expired", 2),
         ("malformed", 2),
+        ("video_pending", 1),
+        ("verify_expired", 2),
+        ("invalid_duration", 1),
+        ("overflow_recovered", 0),
     ],
 )
 def test_exit_codes_with_real_business_client(monkeypatch, install_transport, mode, exit_code):
     result = fake_auth_result()
     monkeypatch.setattr(cli, "authenticate", Mock(return_value=result))
+    finished = False
+    finish_count = 0
 
     # 作用：根据执行场景构造课程列表、题目及完成接口的响应。
     # 参数：
@@ -267,8 +273,9 @@ def test_exit_codes_with_real_business_client(monkeypatch, install_transport, mo
     #     kwargs：传输选项，当前场景只需兼容处理器签名。
     # 返回：当前 mode 对应的内存 Response。
     def handle(session, request, kwargs):
+        nonlocal finished, finish_count
         if request.url.endswith("myCourseList"):
-            if mode == "expired":
+            if mode == "expired" or (mode == "verify_expired" and finished):
                 return make_response(status=401)
             if mode == "malformed":
                 return make_response(text="invalid JSON")
@@ -277,7 +284,19 @@ def test_exit_codes_with_real_business_client(monkeypatch, install_transport, mo
                     []
                     if mode == "empty"
                     else [
-                        {"id": "course", "courseName": "synthetic", "isFinish": mode == "finished"}
+                        {
+                            "id": "course",
+                            "courseName": "synthetic",
+                            "isFinish": mode in {"finished", "video_pending"} or finished,
+                            "duration": None if mode == "invalid_duration" else "123.456789",
+                            "watchDuration": (
+                                "100.10"
+                                if mode == "overflow_recovered" and finish_count < 2
+                                else "100.00"
+                                if (mode == "finished" or finished) and mode != "video_pending"
+                                else "0.00"
+                            ),
+                        }
                     ]
                 )
             )
@@ -287,6 +306,9 @@ def test_exit_codes_with_real_business_client(monkeypatch, install_transport, mo
             return make_response(
                 {"success": False, "code": 500, "message": "synthetic business failure"}
             )
+        if request.url.endswith("/finish"):
+            finished = True
+            finish_count += 1
         return make_response(success())
 
     install_transport(handle)
@@ -297,11 +319,16 @@ def test_exit_codes_with_real_business_client(monkeypatch, install_transport, mo
         stream=stream,
     )
     assert code == exit_code
+    if mode == "overflow_recovered":
+        assert finish_count == 2
     assert result.session.closed
     if exit_code in {0, 1}:
         assert "执行汇总" in stream.getvalue()
     if mode == "failure":
         assert "synthetic business failure" in stream.getvalue()
+    if mode == "video_pending":
+        assert "视频完成状态未确认" in stream.getvalue()
+        assert "所有待处理课程均已完成" not in stream.getvalue()
 
 
 # 作用：验证启动或网络选择阶段的 EOF 与中断退出码。

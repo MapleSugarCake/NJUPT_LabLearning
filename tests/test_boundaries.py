@@ -14,6 +14,7 @@
 """
 
 import ast
+from decimal import Decimal
 from pathlib import Path
 from unittest.mock import Mock
 from urllib.parse import urlsplit
@@ -121,11 +122,11 @@ def test_keyboard_interrupt_cancels_scheduler_and_closes_sessions(install_transp
         completed = Mock(side_effect=KeyboardInterrupt)
         with pytest.raises(KeyboardInterrupt):
             CourseRunner(client, 1, completed=completed).run(
-                [Course(str(i), "synthetic") for i in range(20)]
+                [Course(str(i), "synthetic", duration_seconds=Decimal("12")) for i in range(20)]
             )
         with pytest.raises(RunCancelledError):
             coordinator.check_cancelled()
-    assert all(session.closed for session, _, _ in calls)
+    assert calls and all(session.closed for session, _, _ in calls)
     factory.close()
 
 

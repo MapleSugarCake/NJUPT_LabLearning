@@ -12,19 +12,52 @@
 """
 
 from dataclasses import dataclass
+from decimal import Decimal
 from enum import StrEnum
 from typing import Literal
+
+from .exceptions import ApiError, ResponseFormatError
 
 
 # 作用：表示课程列表中的一门课程及其完成状态。
 # 说明：使用冻结且带 slots 的数据类；id 来自课程列表，供查询题目和标记完成使用。
-# 说明：名称供显示，完成标记默认 False，分类说明可以缺省。
+# 说明：finished 保留服务端完成标记；跳过或成功核验使用 video_finished。
+# 说明：duration_seconds 是视频总秒数，video_percent 是列表 watchDuration 百分比。
 @dataclass(frozen=True, slots=True)
 class Course:
     id: str
     name: str
     finished: bool = False
     type_name: str | None = None
+    duration_seconds: Decimal | None = None
+    video_percent: Decimal | None = None
+
+    @property
+    def video_finished(self) -> bool:
+        """完成标记和视频百分比同时达标，才可以跳过或报告成功。"""
+        percent = self.video_percent
+        return (
+            self.finished
+            and isinstance(percent, Decimal)
+            and percent.is_finite()
+            and percent == 100
+        )
+
+    def require_video_duration(self) -> Decimal:
+        """写入前校验总秒数；缺失或无效时只让当前课程失败。"""
+        duration = self.duration_seconds
+        if not isinstance(duration, Decimal) or not duration.is_finite() or duration <= 0:
+            raise ResponseFormatError("视频总时长缺失或无效，未提交该课程，请到网页核对")
+        return duration
+
+    def require_video_finished(self) -> None:
+        """进度必须恰好为 100；超出时保留真实值，不能当成完成或未知。"""
+        if not self.video_finished:
+            percent = str(self.video_percent)[:80] if self.video_percent is not None else "未知"
+            raise ApiError(
+                f"视频完成状态未确认：完成标记={self.finished}，视频进度={percent}%"
+                "（要求完成且进度为 100%），请到网页核对"
+            )
 
 
 # 作用：保存一条课程题目关系及其提交答案。
@@ -58,7 +91,7 @@ class CourseProgress:
 # 说明：继承 StrEnum，供结果模型和调度汇总共同使用；运行取消通过异常传播。
 class CourseStatus(StrEnum):
     # 课程全部处理成功的状态成员。
-    # 字符串值为 success，表示答题及标记完成均已成功。
+    # 字符串值为 success，表示答题、视频上报及完成状态回读均已成功。
     SUCCESS = "success"
     # 课程处理失败的状态成员。
     # 字符串值为 failed，具体原因及提交结果是否不确定由结果模型保存。

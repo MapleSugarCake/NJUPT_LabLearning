@@ -11,6 +11,7 @@ LOG_FILENAME = "labpass_log.txt"
 class RunSettings:
     debug: bool = False
     workers: int = DEFAULT_WORKERS
+    force_resubmit: bool = False
 
     def __post_init__(self) -> None:
         if type(self.workers) is not int or not 1 <= self.workers <= MAX_WORKERS:

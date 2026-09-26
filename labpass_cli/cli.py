@@ -74,8 +74,8 @@ def _yes_no(prompt: str, input_fn: Input, output_fn: Output) -> bool:
 # 参数：
 #     input_fn：接收提示文本并返回输入字符串的可调用对象。
 #     output_fn：输出普通提示文本的可调用对象。
-# 返回：包含 debug 开关及课程线程数的 RunSettings。
-# 说明：默认 debug 关闭、线程数 4；自定义时只接受 1–4 的整数，非法输入继续询问。
+# 返回：包含 debug、课程线程数及强制重新提交开关的 RunSettings。
+# 说明：默认 debug 和强制重新提交关闭、线程数 4；非法输入继续询问。
 def _settings(input_fn: Input, output_fn: Output) -> RunSettings:
     if not _yes_no("是否自定义设置？默认请选N[y/N]：", input_fn, output_fn):
         return RunSettings()
@@ -83,9 +83,13 @@ def _settings(input_fn: Input, output_fn: Output) -> RunSettings:
     while True:
         value = input_fn("课程并发线程数 [1–4，默认 4]：").strip()
         try:
-            return RunSettings(debug=debug, workers=int(value) if value else DEFAULT_WORKERS)
+            workers = RunSettings(workers=int(value) if value else DEFAULT_WORKERS).workers
         except ValueError:
             output_fn("线程数必须是 1–4 的整数")
+        else:
+            break
+    force_resubmit = _yes_no("是否强制重新提交所有课程？[y/N]：", input_fn, output_fn)
+    return RunSettings(debug=debug, workers=workers, force_resubmit=force_resubmit)
 
 
 # 作用：在认证前要求用户明确选择网络环境。
@@ -223,13 +227,13 @@ def _print_summary(summary: RunSummary) -> None:
 
 # 作用：在已配置日志的环境下完成认证、课程筛选及调度。
 # 参数：
-#     settings：已校验的本轮运行设置，提供并发课程线程数。
+#     settings：已校验的本轮运行设置，提供并发课程线程数及强制重新提交开关。
 #     environment：登录前明确选择的校园网直连或校外 VPN 环境。
 #     input_fn：接收提示文本并返回输入字符串的可调用对象。
 #     secret_input：用于隐藏输入 Token 的可调用对象，不用于密码输入。
 #     redactor：本轮共享的脱敏上下文，用于凭据登记及全部日志输出。
 # 返回：全部待处理课程成功或为空时返回 0，至少一门失败时返回 1。
-# 说明：创建唯一运行级写入协调器，跳过已经完成的课程并渲染进度与汇总。
+# 说明：创建唯一运行级写入协调器，默认跳过已完成课程；强制模式处理全部课程。
 # 说明：线程结束后关闭主客户端和认证结果；认证、课程列表或全局失效异常交由 run_cli 转换退出码。
 def execute(
     settings: RunSettings,
@@ -241,6 +245,8 @@ def execute(
 ) -> int:
     """在已配置日志的环境下完成认证、课程筛选及调度。"""
     started = time.perf_counter()
+    if settings.force_resubmit:
+        logger.info("强制重新提交所有课程模式已启用，将重新执行本次课程列表中全部课程的完整流程。")
     authentication = _authenticate(environment, input_fn, secret_input, redactor)
     coordinator = MutationCoordinator()
     with (
@@ -254,8 +260,13 @@ def execute(
     ):
         logger.info("登录成功，正在获取课程列表…")
         courses = client.list_courses()
-        pending = [course for course in courses if not course.finished]
-        finished = len(courses) - len(pending)
+        finished = sum(course.video_finished for course in courses)
+        pending = (
+            courses
+            if settings.force_resubmit
+            else [course for course in courses if not course.video_finished]
+        )
+        skipped = len(courses) - len(pending)
         logger.info(
             "发现 %d 门课程：%d 门已完成，%d 门待处理", len(courses), finished, len(pending)
         )
@@ -265,7 +276,7 @@ def execute(
             progress=_progress,
             completed=_completed,
         ).run(pending)
-    summary = RunSummary(len(courses), finished, tuple(results), time.perf_counter() - started)
+    summary = RunSummary(len(courses), skipped, tuple(results), time.perf_counter() - started)
     _print_summary(summary)
     return 1 if summary.failed else 0
 

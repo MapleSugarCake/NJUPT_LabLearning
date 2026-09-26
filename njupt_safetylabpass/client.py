@@ -12,8 +12,12 @@
     SafetyLabClient.list_courses：读取课程列表并规范化字段与重复记录。
     SafetyLabClient.list_questions：读取题目并保留提交标识、来源标识及答案的独立语义。
     SafetyLabClient.submit_answer：在共享写入锁内提交一条完整题目的答案。
+    SafetyLabClient.submit_video_progress：一次上报课程列表中的视频完整秒数。
+    SafetyLabClient.verify_video_finished：回读并核验完成标记及视频百分比。
+    SafetyLabClient.read_video_status：回读课程状态，保留超过 100 的实际百分比。
     SafetyLabClient.finish_course：在共享写入锁内按课程列表标识标记完成。
     _first_text：按候选键顺序取得第一个非空文本值。
+    _parse_decimal：解析视频总秒数或百分比，无效字段保留为未知。
     _required_text：提取必须存在且非空的题目标识字段。
     _normalize_answer：校验答案类型并按逗号规则规范化提交内容。
     _is_lock_conflict：兼容识别服务端两种写入锁冲突拼写。
@@ -25,6 +29,7 @@ import logging
 import time
 from collections.abc import Callable
 from contextlib import AbstractContextManager
+from decimal import ROUND_DOWN, Decimal, InvalidOperation
 from typing import Any, Self
 
 import requests
@@ -39,6 +44,7 @@ from .exceptions import (
     LockConflictError,
     NetworkError,
     ResponseFormatError,
+    RunCancelledError,
     SubmissionUncertainError,
 )
 from .models import Course, Question
@@ -175,6 +181,13 @@ class SafetyLabClient(AbstractContextManager["SafetyLabClient"]):
                 error_payload = response.json()
             except ValueError:
                 error_payload = None
+            if isinstance(error_payload, dict):
+                logger.debug(
+                    "API 业务错误：%s；code=%s；message=%s",
+                    endpoint_name,
+                    self.redactor.excerpt(error_payload.get("code")),
+                    self.redactor.excerpt(error_payload.get("message")),
+                )
             if isinstance(error_payload, dict) and str(error_payload.get("code")) in {"401", "403"}:
                 self.mutation_coordinator.cancel(authentication_failed=True)
                 raise AuthenticationExpiredError("服务器报告登录状态已失效，请重新认证")
@@ -196,6 +209,13 @@ class SafetyLabClient(AbstractContextManager["SafetyLabClient"]):
         success = payload.get("success")
         failed_code = code is not None and str(code) not in {"0", "200"}
         message = self.redactor.excerpt(payload.get("message") or "服务器返回业务错误")
+        if success is False or failed_code or _is_lock_conflict(message):
+            logger.debug(
+                "API 业务错误：%s；code=%s；message=%s",
+                endpoint_name,
+                self.redactor.excerpt(code),
+                message,
+            )
         if str(code) in {"401", "403"}:
             self.mutation_coordinator.cancel(authentication_failed=True)
             raise AuthenticationExpiredError(f"登录状态已失效：{message}")
@@ -245,10 +265,12 @@ class SafetyLabClient(AbstractContextManager["SafetyLabClient"]):
                 name=name or f"课程 {course_id}",
                 finished=_is_finished(item.get("isFinish")),
                 type_name=type_name,
+                duration_seconds=_parse_decimal(item.get("duration"), positive=True),
+                video_percent=_parse_decimal(item.get("watchDuration"), percentage=True),
             )
 
             previous = unique.get(course_id)
-            if previous is None or (previous.finished and not course.finished):
+            if previous is None or (previous.video_finished and not course.video_finished):
                 unique[course_id] = course
             else:
                 logger.debug("忽略重复课程记录：%s", course_id)
@@ -321,6 +343,43 @@ class SafetyLabClient(AbstractContextManager["SafetyLabClient"]):
                 },
             )
 
+    def submit_video_progress(self, course: Course) -> None:
+        """截取总时长的整数秒，一次上报；不将不足一秒的尾部扩为一秒。"""
+        duration = course.require_video_duration()
+        watch_duration = format(duration.to_integral_value(rounding=ROUND_DOWN), "f")
+        with self.mutation_coordinator.serialized():
+            logger.debug("视频时长：总秒数=%s；上报整数秒数=%s", duration, watch_duration)
+            self._request_json(
+                "POST",
+                self.api_base_url + "/jcedutec/courseSource/finishRate",
+                "提交视频进度",
+                require_result=False,
+                json={"id": course.id, "watchDuration": watch_duration},
+            )
+
+    def verify_video_finished(self, course_id: str) -> None:
+        """只回读一次课程列表；不轮询状态，也不重发任何写入。"""
+        self.read_video_status(course_id).require_video_finished()
+
+    def read_video_status(self, course_id: str) -> Course:
+        """读取服务端真实状态，异常不能作为再次提交 finish 的依据。"""
+        try:
+            courses = self.list_courses()
+        except (AuthenticationExpiredError, RunCancelledError):
+            raise
+        except (ApiError, NetworkError) as exc:
+            raise ApiError(f"视频完成状态未确认：回读失败，{exc}") from exc
+        course = next((item for item in courses if item.id == course_id), None)
+        if course is None:
+            raise ApiError("视频完成状态未确认：课程列表中缺少该课程，请到网页核对")
+        logger.debug(
+            "视频完成状态：课程=%s；完成标记=%s；进度百分比=%s",
+            self.redactor.excerpt(course_id),
+            course.finished,
+            self.redactor.excerpt(course.video_percent),
+        )
+        return course
+
     # 作用：在共享写入锁内按课程列表标识标记完成。
     # 参数：
     #     self：当前实例。
@@ -349,6 +408,25 @@ def _first_text(item: dict[str, Any], *keys: str) -> str | None:
         if value is not None and str(value).strip():
             return str(value).strip()
     return None
+
+
+def _parse_decimal(
+    value: object, *, positive: bool = False, percentage: bool = False
+) -> Decimal | None:
+    """解析时长或百分比；无效字段保留为未知，不使其他课程无法执行。"""
+    if isinstance(value, bool) or not isinstance(value, (str, int, float, Decimal)):
+        return None
+    try:
+        number = Decimal(str(value))
+    except InvalidOperation:
+        return None
+    if not number.is_finite():
+        return None
+    if positive and number <= 0:
+        return None
+    if percentage and number < 0:
+        return None
+    return number
 
 
 # 作用：提取必须存在且非空的题目标识字段。
