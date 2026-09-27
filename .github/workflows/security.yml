@@ -1,0 +1,60 @@
+name: Security
+
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+  schedule:
+    - cron: "43 3 * * 1"
+  workflow_dispatch:
+  workflow_call:
+    inputs:
+      checkout_ref:
+        description: Git ref to audit, used by the release workflow
+        type: string
+        required: false
+        default: ""
+
+permissions:
+  contents: read
+
+jobs:
+  dependency_review:
+    name: Dependency review
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Review supported dependency changes
+        uses: actions/dependency-review-action@a1d282b36b6f3519aa1f3fc636f609c47dddb294 # v5.0.0
+        with:
+          fail-on-severity: moderate
+          license-check: false
+
+  python_audit:
+    name: Locked Python dependency audit
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ inputs.checkout_ref || github.ref }}
+          persist-credentials: false
+      - name: Set up Python
+        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
+        with:
+          python-version: "3.13"
+      - name: Set up uv
+        uses: astral-sh/setup-uv@c771a70e6277c0a99b617c7a806ffedaca235ff9 # v9.0.0
+        with:
+          version: "0.12.19"
+      - name: Export every locked dependency to a temporary file
+        run: uv export --locked --all-extras --all-groups --no-emit-project --no-hashes --output-file "$RUNNER_TEMP/labpass-locked-requirements.txt"
+      - name: Audit locked Python dependencies
+        run: uvx --from pip-audit==2.10.1 pip-audit --no-deps --disable-pip --cache-dir "$RUNNER_TEMP/pip-audit-cache" --vulnerability-service osv --requirement "$RUNNER_TEMP/labpass-locked-requirements.txt"

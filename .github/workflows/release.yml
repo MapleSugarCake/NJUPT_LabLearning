@@ -1,0 +1,111 @@
+name: Release
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Existing version tag, for example v2.0.0
+        type: string
+        required: true
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ inputs.tag }}
+  cancel-in-progress: false
+
+jobs:
+  preflight:
+    name: Validate release tag
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    outputs:
+      commit: ${{ steps.validate.outputs.commit }}
+    steps:
+      - name: Checkout main with tags
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: main
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Set up Python
+        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
+        with:
+          python-version: "3.13"
+      - name: Reject invalid or previously released tags
+        id: validate
+        env:
+          LABPASS_RELEASE_TAG: ${{ inputs.tag }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: python tools/ci_release_preflight.py
+
+  ci:
+    name: Verify tagged source
+    needs: preflight
+    permissions:
+      contents: read
+    uses: ./.github/workflows/ci.yml
+    with:
+      checkout_ref: ${{ needs.preflight.outputs.commit }}
+
+  security:
+    name: Audit tagged dependencies
+    needs: preflight
+    permissions:
+      contents: read
+    uses: ./.github/workflows/security.yml
+    with:
+      checkout_ref: ${{ needs.preflight.outputs.commit }}
+
+  build:
+    name: Build tagged distributions
+    needs: [preflight, ci, security]
+    permissions:
+      contents: read
+    uses: ./.github/workflows/build.yml
+    with:
+      checkout_ref: ${{ needs.preflight.outputs.commit }}
+
+  publish:
+    name: Publish GitHub Release
+    needs: [preflight, build]
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: write
+    env:
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      RELEASE_TAG: ${{ inputs.tag }}
+    steps:
+      - name: Checkout main with tags
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: main
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Verify tag still points to tested commit
+        env:
+          TESTED_COMMIT: ${{ needs.preflight.outputs.commit }}
+        shell: bash
+        run: test "$(git rev-parse --verify "refs/tags/$RELEASE_TAG^{commit}")" = "$TESTED_COMMIT"
+      - name: Download Python distributions
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: python-distributions
+          path: release-assets
+      - name: Download Windows EXE
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: windows-exe
+          path: release-assets
+      - name: Check release files and write SHA-256 sums
+        shell: bash
+        run: |
+          test "$(find release-assets -maxdepth 1 -name '*.whl' | wc -l)" -eq 1
+          test "$(find release-assets -maxdepth 1 -name '*.tar.gz' | wc -l)" -eq 1
+          test -f release-assets/labpass.exe
+          (cd release-assets && sha256sum *.whl *.tar.gz labpass.exe > SHA256SUMS.txt)
+      - name: Publish after every check passes
+        shell: bash
+        run: gh release create "$RELEASE_TAG" release-assets/* --verify-tag --generate-notes --title "LabPass ${RELEASE_TAG#v}"

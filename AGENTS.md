@@ -8,7 +8,7 @@
 
 LabPass 是 Python 3.13+ 控制台工具。一个发行项目包含 `njupt_auth`、`njupt_safetylabpass`、`labpass_cli` 三个包，不保留旧 `labpass` 包或旧参数兼容层。版本以根目录 `pyproject.toml` 的 `project.version` 为唯一来源，不在源码中维护版本常量或硬编码回退值。
 
-- `main.py`：仅调用 `labpass_cli.cli.entrypoint`。
+- `main.py`：打印固定横幅后调用 `labpass_cli.cli.entrypoint`，不承载认证或课程逻辑。
 - `njupt_auth`：校内外 SSO/CAS/VPN、加密、浏览器认证、Token 导入、只读鉴权、Session 工厂、传输策略和脱敏基础能力；不包含课程业务、线程调度或控制台交互。
 - `njupt_safetylabpass`：使用已认证资源会话执行课程业务，不负责登录、交互或线程池；`client.py` 负责业务 API、HTTP/业务校验、课程和题目解析。
 - `njupt_safetylabpass/course.py`：单课程顺序执行；只返回结果和进度事件，不创建线程池或输出控制台文本。
@@ -127,7 +127,7 @@ LabPass 是 Python 3.13+ 控制台工具。一个发行项目包含 `njupt_auth`
 
 ## 控制台、日志与敏感信息
 
-- 不引入 argparse 或其他命令行参数解析。启动首先打印版本，第一次输入固定为是否自定义设置的 y/n 选择。
+- 不引入 argparse 或其他命令行参数解析。通过 `main.py` 或 EXE 启动时可以先打印固定横幅；各入口均须在第一次输入前显示版本，第一次输入固定为是否自定义设置的 y/n 选择。
 - `RunSettings` 默认 `debug=False`、`workers=4`、`force_resubmit=False`；自定义设置按 debug → 并发线程数 → 是否强制重新提交所有课程的顺序询问。线程数只接受整数 1–4，布尔值不作为整数接受，非法输入重新询问。选择默认设置不询问强制模式，设置不持久化。
 - 强制模式只改变首次课程列表的筛选：按课程 ID 去重后全部处理，包括原本已完成的课程；每门仍执行完整答题、视频上报和完成核验。回读新增课程不加入本轮，不删除课程记录，也不承诺服务端覆盖旧结果。
 - `RunSummary.discovered` 为首次去重后的课程数量，`results` 是本轮结果元组；`already_finished` 当前字段语义是实际跳过数量，强制模式为零，不等于首次列表中已完成数量。成功/失败只统计本轮执行结果。
@@ -141,8 +141,6 @@ LabPass 是 Python 3.13+ 控制台工具。一个发行项目包含 `njupt_auth`
 - 所有应用日志出口使用同一个运行级脱敏上下文，包含异常堆栈；只输出安全且有界的服务端消息，不输出任意原始错误页。`run_cli` 创建 Redactor 并交给认证、会话工厂及日志格式器；认证/传输层登记秘密值，`logging_utils.py` 过滤各日志出口及堆栈，CLI 最终在 `finally` 清空登记。关闭认证结果本身不会清空共享 Redactor；独立使用认证包时由调用方管理其生命周期。
 - 正常退出和异常退出均关闭日志 handler；不通过全局变量保存认证状态或秘密值。
 - EXE 结束时等待回车，源码不暂停；保持 `main.spec` 的 console=True。
-
-**已知偏差：入口输出顺序。** 当前 `main.py` 在调用 `entrypoint` 前打印横幅，违反“入口仅调用 entrypoint”和“启动首先打印版本”的规范；不能因为 `run_cli` 自身先输出版本就认定源码入口合规。对应回归检查为 `tests/test_cli.py::test_source_entrypoint_version_first_and_eof_before_network`。此偏差修复前保留规范和检查，不把横幅首行写成新约定。
 
 ## 退出码和代码规范
 
@@ -191,7 +189,7 @@ uv run --extra browser --group build pyinstaller --clean --noconfirm main.spec
 
 wheel 应包含三个包，sdist 不得包含 Temp/HAR、认证材料或构建目录。EXE 必须包含由唯一版本源生成的 labpass 发行元数据及 Playwright 驱动，不包含 Edge 本体。build、dist 和日志不提交。
 
-删除参数后，EXE 验收不再使用 --help/--version。用无凭据且不触发网络的输入检查版本首行、首个提示、EOF 退出、EXE 暂停、日志路径和文件冲突；另验证 wheel/sdist 安装及三包导入。
+删除参数后，EXE 验收不再使用 --help/--version。用无凭据且不触发网络的输入检查横幅后显示版本、首个提示、EOF 退出、EXE 暂停、日志路径和文件冲突；另验证 wheel/sdist 安装及三包导入。
 
 接口、目录、交互、网络要求、隐私、并发、重试、退出码、安装测试或构建命令变化时同步 README。README 不得承诺完成考试，也不得把模拟测试描述为真实账号成功。
 

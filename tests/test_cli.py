@@ -5,8 +5,8 @@
     Inputs.__init__：保存输入迭代器及可选的共享提示记录。
     Inputs.__call__：记录当前提示并返回下一项预设输入。
     fake_auth_result：创建仅含虚构资源材料的认证结果用于交互测试。
-    test_source_entrypoint_version_first_and_eof_before_network：
-        验证源码入口应先输出版本并在首次输入结束时退出。
+    test_source_entrypoint_banner_and_version_before_first_input：
+        验证源码入口先显示固定横幅、输入前显示版本，且 EOF 不发起认证。
     test_version_and_first_prompt_then_default_settings：验证版本与首提示顺序以及默认运行设置。
     test_invalid_inputs_reprompt_and_custom_settings：
         验证非法选项重新询问并最终采用有效自定义设置。
@@ -87,21 +87,22 @@ def fake_auth_result():
     return AuthenticationResult(factory(), base, factory)
 
 
-# 作用：验证源码入口应先输出版本并在首次输入结束时退出。
-# 参数：
-#     monkeypatch：pytest 替换夹具，用于临时替换对象或环境，测试结束后自动恢复。
-#     capsys：pytest 标准输出捕获夹具，用于检查版本首行。
-# 返回：无返回值（None）；测试函数通过断言验证预期。
-# 说明：直接运行入口脚本但注入立即结束的输入，断言退出码和首个提示；全程不进入真实认证。
-def test_source_entrypoint_version_first_and_eof_before_network(monkeypatch, capsys):
-    events = []
-    monkeypatch.setattr("builtins.input", Inputs([], events))
+def test_source_entrypoint_banner_and_version_before_first_input(monkeypatch, capsys):
+    prompts = []
+
+    def end_input(prompt):
+        prompts.append(prompt)
+        output = capsys.readouterr().out.splitlines()
+        assert output[0] == "*" * 64
+        assert output[-1] == "LabPass " + get_version()
+        raise EOFError
+
+    monkeypatch.setattr("builtins.input", end_input)
     main = Path(__file__).resolve().parents[1] / "main.py"
     with pytest.raises(SystemExit) as exit_info:
         runpy.run_path(str(main), run_name="__main__")
     assert exit_info.value.code == 2
-    assert capsys.readouterr().out.splitlines()[0] == "LabPass " + get_version()
-    assert events == ["是否自定义设置？默认请选N[y/N]："]
+    assert prompts == ["是否自定义设置？默认请选N[y/N]："]
 
 
 # 作用：验证版本与首提示顺序以及默认运行设置。
