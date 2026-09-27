@@ -90,12 +90,12 @@ jobs:
         shell: bash
         run: test "$(git rev-parse --verify "refs/tags/$RELEASE_TAG^{commit}")" = "$TESTED_COMMIT"
       - name: Download Python distributions
-        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
           name: python-distributions
           path: release-assets
       - name: Download Windows EXE
-        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
           name: windows-exe
           path: release-assets
