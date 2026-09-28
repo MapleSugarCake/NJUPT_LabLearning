@@ -105,6 +105,25 @@ def test_source_entrypoint_banner_and_version_before_first_input(monkeypatch, ca
     assert prompts == ["是否自定义设置？默认请选N[y/N]："]
 
 
+def test_console_output_encoding_supports_redirected_windows_streams(monkeypatch):
+    stdout_bytes = io.BytesIO()
+    stderr_bytes = io.BytesIO()
+    stdout = io.TextIOWrapper(stdout_bytes, encoding="cp1252", write_through=True)
+    stderr = io.TextIOWrapper(stderr_bytes, encoding="cp1252", write_through=True)
+    monkeypatch.setattr(sys, "stdout", stdout)
+    monkeypatch.setattr(sys, "stderr", stderr)
+
+    with pytest.raises(UnicodeEncodeError):
+        stdout.write("是否自定义设置？")
+
+    cli.configure_console_output()
+    print("是否自定义设置？")
+    print("输入已结束", file=sys.stderr)
+
+    assert stdout_bytes.getvalue().decode("utf-8").splitlines() == ["是否自定义设置？"]
+    assert stderr_bytes.getvalue().decode("utf-8").splitlines() == ["输入已结束"]
+
+
 # 作用：验证版本与首提示顺序以及默认运行设置。
 # 参数：
 #     monkeypatch：pytest 替换夹具，用于临时替换对象或环境，测试结束后自动恢复。

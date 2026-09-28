@@ -8,9 +8,10 @@ entrypoint 负责运行交互流程、处理可执行文件暂停并发出进程
     无自行定义的函数、类或模块变量。
 """
 
-from labpass_cli.cli import entrypoint
+from labpass_cli.cli import configure_console_output, entrypoint
 
 if __name__ == "__main__":
+    configure_console_output()
     print("****************************************************************")
     print("script by NJUPT2025 MapleCake")
     print("本脚本坚持免费，请抵制倒买倒卖行为")

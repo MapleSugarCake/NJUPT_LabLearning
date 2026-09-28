@@ -4,6 +4,7 @@
     logger：控制台交互与执行汇总的模块日志记录器。
     Input：提示输入函数的类型别名。
     Output：提示输出函数的类型别名。
+    configure_console_output：确保重定向输出时也能编码中文提示。
     _yes_no：循环读取大小写不敏感的 y/n 选择。
     _settings：通过首个交互选择构造仅本次生效的运行设置。
     _network：在认证前要求用户明确选择网络环境。
@@ -22,6 +23,7 @@ import sys
 import time
 from collections.abc import Callable
 from contextlib import suppress
+from io import TextIOWrapper
 from typing import TextIO
 
 from njupt_auth import (
@@ -51,6 +53,13 @@ Input = Callable[[str], str]
 # 提示输出函数的类型别名。
 # 表示接收字符串并返回 None 的 Callable，用于启动提示及可测试输出。
 Output = Callable[[str], None]
+
+
+def configure_console_output() -> None:
+    """让重定向到管道的 Windows 控制台也能输出中文提示。"""
+    for stream in (sys.stdout, sys.stderr):
+        if isinstance(stream, TextIOWrapper):
+            stream.reconfigure(encoding="utf-8")
 
 
 # 作用：循环读取大小写不敏感的 y/n 选择。
@@ -354,6 +363,7 @@ def run_cli(
 # 返回：抛出携带退出码的 SystemExit，不返回值。
 # 说明：冻结的 EXE 在结束前等待回车，并容忍暂停阶段的 EOF 或中断；源码入口直接退出。
 def entrypoint() -> None:
+    configure_console_output()
     exit_code = run_cli()
     if getattr(sys, "frozen", False):
         with suppress(EOFError, KeyboardInterrupt):
