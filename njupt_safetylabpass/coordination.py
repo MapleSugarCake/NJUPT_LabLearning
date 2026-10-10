@@ -5,6 +5,7 @@
     MutationCoordinator.__init__：创建写入互斥锁及两个运行状态事件。
     MutationCoordinator.cancel：设置运行取消状态并可同时登记全局认证失效。
     MutationCoordinator.check_cancelled：在请求或任务开始前检查运行状态。
+    MutationCoordinator.wait：等待指定间隔，取消或认证失效时立即结束并抛出。
     MutationCoordinator.serialized：在共享互斥锁内提供允许执行写入的上下文。
 """
 
@@ -52,6 +53,12 @@ class MutationCoordinator:
             raise AuthenticationExpiredError("任务因登录状态失效而取消")
         if self._cancelled.is_set():
             raise RunCancelledError("任务已取消")
+
+    def wait(self, seconds: float) -> None:
+        """在取消信号上等待；等待前后检查状态，取消时无需等满间隔。"""
+        self.check_cancelled()
+        self._cancelled.wait(seconds)
+        self.check_cancelled()
 
     # 作用：在共享互斥锁内提供允许执行写入的上下文。
     # 参数：

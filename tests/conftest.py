@@ -3,6 +3,7 @@
 本文件定义：
     _SESSION_SEND：安装网络阻断前保存的 requests.Session.send 原始方法。
     block_network：为每个测试默认封锁 HTTP 发送、域名解析和 socket 连接。
+    fast_video_delays：默认模拟随机间隔并跳过真实等待，时间边界测试设置确定间隔并模拟时钟。
     make_response：在内存中构造 requests.Response 以模拟 HTTP 返回。
     success：构造符合接口约定的成功 JSON 外层结构。
     cookie_response：构造可进入 requests 原生 Set-Cookie 解析流程的模拟响应。
@@ -19,9 +20,19 @@ from unittest.mock import Mock
 import pytest
 import requests
 
+from njupt_safetylabpass import client as business_client
+
 # 安装网络阻断前保存的 requests.Session.send 原始方法。
 # 仅在模拟适配器已安装的夹具中调用，以测试真实 Cookie 提取流程而不打开网络连接。
 _SESSION_SEND = requests.Session.send
+
+
+@pytest.fixture(autouse=True)
+def fast_video_delays(monkeypatch):
+    """普通回归跳过真实延迟；时间测试指定随机结果并使用模拟时钟。"""
+    delay = Mock(return_value=0.0)
+    monkeypatch.setattr(business_client, "uniform", delay)
+    return delay
 
 
 # 作用：为每个测试默认封锁 HTTP 发送、域名解析和 socket 连接。

@@ -10,7 +10,6 @@ from pathlib import Path
 from PyInstaller.archive.readers import CArchiveReader
 
 ROOT = Path(__file__).resolve().parents[1]
-EXE = ROOT / "dist" / "labpass.exe"
 
 
 def require(condition: bool, message: str) -> None:
@@ -45,10 +44,12 @@ def run(
 
 
 def main() -> None:
-    require(EXE.is_file(), "尚未构建 dist/labpass.exe")
     with (ROOT / "pyproject.toml").open("rb") as file:
         version = tomllib.load(file)["project"]["version"]
-    archive_names = {name.replace("\\", "/") for name in CArchiveReader(str(EXE)).toc}
+    executable_name = f"NJUPT_Labpass_v{version}.exe"
+    built_executable = ROOT / "dist" / executable_name
+    require(built_executable.is_file(), f"尚未构建 dist/{executable_name}")
+    archive_names = {name.replace("\\", "/") for name in CArchiveReader(str(built_executable)).toc}
     require(f"labpass-{version}.dist-info/METADATA" in archive_names, "EXE 缺少发行元数据")
     require("playwright/driver/node.exe" in archive_names, "EXE 缺少 Playwright 驱动")
     with tempfile.TemporaryDirectory(prefix="labpass-exe-") as directory:
@@ -57,8 +58,8 @@ def main() -> None:
         working_directory = temporary / "cwd"
         executable_directory.mkdir()
         working_directory.mkdir()
-        executable = executable_directory / "labpass.exe"
-        shutil.copy2(EXE, executable)
+        executable = executable_directory / executable_name
+        shutil.copy2(built_executable, executable)
 
         initial = run(executable, working_directory, "")
         lines = initial.stdout.splitlines()
@@ -73,6 +74,7 @@ def main() -> None:
 
         debug_answers = "y\ny\n\n\n"
         debug = run(executable, working_directory, debug_answers)
+        require("课程并发线程数 [1–4，默认 1]" in debug.stdout, "EXE 默认线程数不是 1")
         log_file = executable_directory / "labpass_log.txt"
         require_exit_two(debug, "debug 模式在网络选择 EOF 时未返回 2")
         require(log_file.is_file(), "EXE 未在自身目录创建日志")

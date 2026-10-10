@@ -2,7 +2,7 @@
 
 from dataclasses import dataclass
 
-DEFAULT_WORKERS = 4
+DEFAULT_WORKERS = 1
 MAX_WORKERS = 4
 LOG_FILENAME = "labpass_log.txt"
 

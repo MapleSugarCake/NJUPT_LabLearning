@@ -129,7 +129,7 @@ def test_console_output_encoding_supports_redirected_windows_streams(monkeypatch
 #     monkeypatch：pytest 替换夹具，用于临时替换对象或环境，测试结束后自动恢复。
 #     tmp_path：pytest 提供的独立临时目录，用于隔离文件操作。
 # 返回：无返回值（None）；测试函数通过断言验证预期。
-# 说明：以模拟 execute 检查 debug 关闭、四线程和默认校外环境，同时确认没有创建日志文件。
+# 说明：以模拟 execute 检查 debug 关闭、单线程和默认校外环境，同时确认没有创建日志文件。
 def test_version_and_first_prompt_then_default_settings(monkeypatch, tmp_path):
     monkeypatch.chdir(tmp_path)
     events = []
@@ -139,9 +139,17 @@ def test_version_and_first_prompt_then_default_settings(monkeypatch, tmp_path):
     assert cli.run_cli(input_fn=inputs, output_fn=events.append) == 0
     assert events[0] == "LabPass " + get_version()
     assert events[1] == "是否自定义设置？默认请选N[y/N]："
-    assert execute.call_args.args[0] == RunSettings()
+    assert execute.call_args.args[0] == RunSettings(workers=1)
     assert execute.call_args.kwargs["environment"] is NetworkEnvironment.EXTRANET
     assert not (tmp_path / "labpass_log.txt").exists()
+
+
+@pytest.mark.parametrize("answer,workers", [("", 1), ("1", 1), ("2", 2), ("3", 3), ("4", 4)])
+def test_custom_worker_setting_keeps_full_range_and_defaults_to_one(answer, workers):
+    """自定义设置的回车默认单线程，显式选择仍允许完整的 1–4 范围。"""
+    inputs = Inputs(["y", "n", answer, "n"])
+    assert cli._settings(inputs, lambda _: None) == RunSettings(workers=workers)
+    assert inputs.events[2] == "课程并发线程数 [1–4，默认 1]："
 
 
 # 作用：验证非法选项重新询问并最终采用有效自定义设置。
@@ -277,7 +285,7 @@ def test_browser_failure_returns_to_fallback_choice(monkeypatch):
         ("video_pending", 1),
         ("verify_expired", 2),
         ("invalid_duration", 1),
-        ("overflow_recovered", 0),
+        ("video_overflow", 1),
     ],
 )
 def test_exit_codes_with_real_business_client(monkeypatch, install_transport, mode, exit_code):
@@ -311,7 +319,7 @@ def test_exit_codes_with_real_business_client(monkeypatch, install_transport, mo
                             "duration": None if mode == "invalid_duration" else "123.456789",
                             "watchDuration": (
                                 "100.10"
-                                if mode == "overflow_recovered" and finish_count < 2
+                                if mode == "video_overflow"
                                 else "100.00"
                                 if (mode == "finished" or finished) and mode != "video_pending"
                                 else "0.00"
@@ -339,8 +347,8 @@ def test_exit_codes_with_real_business_client(monkeypatch, install_transport, mo
         stream=stream,
     )
     assert code == exit_code
-    if mode == "overflow_recovered":
-        assert finish_count == 2
+    if mode in {"success", "video_pending", "video_overflow", "verify_expired"}:
+        assert finish_count == 1
     assert result.session.closed
     if exit_code in {0, 1}:
         assert "执行汇总" in stream.getvalue()
@@ -394,13 +402,13 @@ def test_login_failure_returns_two_without_credentials_in_output(monkeypatch):
 # 参数：
 #     monkeypatch：pytest 替换夹具，用于临时替换对象或环境，测试结束后自动恢复。
 # 返回：无返回值（None）；测试函数通过断言验证预期。
-# 说明：注入旧参数后仍按默认输入得到四线程配置，由模拟执行器避免业务请求。
+# 说明：注入旧参数后仍按默认输入得到单线程配置，由模拟执行器避免业务请求。
 def test_old_flags_are_not_parsed(monkeypatch):
     monkeypatch.setattr(sys, "argv", ["main.py", "--version", "--workers", "99"])
     execute = Mock(return_value=0)
     monkeypatch.setattr(cli, "execute", execute)
     assert cli.run_cli(input_fn=Inputs(["n", ""]), output_fn=lambda _: None) == 0
-    assert execute.call_args.args[0].workers == 4
+    assert execute.call_args.args[0].workers == 1
 
 
 # 作用：验证只有冻结程序退出前等待回车。

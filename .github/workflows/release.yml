@@ -22,6 +22,7 @@ jobs:
     timeout-minutes: 10
     outputs:
       commit: ${{ steps.validate.outputs.commit }}
+      version: ${{ steps.validate.outputs.version }}
     steps:
       - name: Checkout main with tags
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -77,6 +78,7 @@ jobs:
     env:
       GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
       RELEASE_TAG: ${{ inputs.tag }}
+      RELEASE_VERSION: ${{ needs.preflight.outputs.version }}
     steps:
       - name: Checkout main with tags
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -104,8 +106,9 @@ jobs:
         run: |
           test "$(find release-assets -maxdepth 1 -name '*.whl' | wc -l)" -eq 1
           test "$(find release-assets -maxdepth 1 -name '*.tar.gz' | wc -l)" -eq 1
-          test -f release-assets/labpass.exe
-          (cd release-assets && sha256sum *.whl *.tar.gz labpass.exe > SHA256SUMS.txt)
+          test "$(find release-assets -maxdepth 1 -name '*.exe' | wc -l)" -eq 1
+          test -f "release-assets/NJUPT_Labpass_v${RELEASE_VERSION}.exe"
+          (cd release-assets && sha256sum *.whl *.tar.gz "NJUPT_Labpass_v${RELEASE_VERSION}.exe" > SHA256SUMS.txt)
       - name: Publish after every check passes
         shell: bash
-        run: gh release create "$RELEASE_TAG" release-assets/* --verify-tag --generate-notes --title "LabPass ${RELEASE_TAG#v}"
+        run: gh release create "$RELEASE_TAG" release-assets/* --verify-tag --generate-notes --title "NJUPT_Labpass_v${RELEASE_VERSION}"

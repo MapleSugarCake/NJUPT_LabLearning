@@ -20,6 +20,7 @@ SDIST_TOP_LEVEL = PACKAGES | {
     "favicon.ico",
     "README.md",
     "AGENTS.md",
+    "LICENSE",
     ".gitignore",
     "pyproject.toml",
     "uv.lock",
@@ -35,6 +36,12 @@ def require(condition: bool, message: str) -> None:
 def inspect_wheel(path: Path, version: str) -> None:
     with zipfile.ZipFile(path) as archive:
         names = set(archive.namelist())
+        license_path = f"labpass-{version}.dist-info/licenses/LICENSE"
+        require(license_path in names, "wheel 缺少 MIT 许可证")
+        require(archive.read(license_path) == (ROOT / "LICENSE").read_bytes(), "wheel 许可证不一致")
+        metadata = archive.read(f"labpass-{version}.dist-info/METADATA").decode("utf-8")
+        require("License-Expression: MIT" in metadata.splitlines(), "wheel 缺少 MIT 许可声明")
+        require("License-File: LICENSE" in metadata.splitlines(), "wheel 缺少许可证文件声明")
     for package in PACKAGES:
         require(f"{package}/__init__.py" in names, f"wheel 缺少 {package}")
     top_level = {name.split("/", 1)[0] for name in names}
@@ -65,6 +72,7 @@ def inspect_sdist(path: Path, version: str) -> None:
     for package in PACKAGES:
         require(f"{package}/__init__.py" in names, f"sdist 缺少 {package}")
     require("pyproject.toml" in names, "sdist 缺少构建配置")
+    require("LICENSE" in names, "sdist 缺少 MIT 许可证")
     require(
         not any(name.lower().endswith((".har", ".log")) for name in names), "sdist 包含日志或 HAR"
     )
@@ -98,6 +106,9 @@ def install_and_check(path: Path, version: str) -> None:
                 str(python),
                 "-c",
                 "import njupt_auth, njupt_safetylabpass, labpass_cli; "
+                "from labpass_cli.config import RunSettings; "
+                "assert RunSettings().workers == 1; "
+                "assert RunSettings(workers=4).workers == 4; "
                 "from importlib.metadata import version; "
                 f"assert version('labpass') == {version!r}",
             ],
