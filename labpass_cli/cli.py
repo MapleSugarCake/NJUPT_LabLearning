@@ -22,7 +22,7 @@ import logging
 import sys
 import time
 from collections.abc import Callable
-from contextlib import suppress
+from contextlib import nullcontext, suppress
 from io import TextIOWrapper
 from typing import TextIO
 
@@ -41,6 +41,7 @@ from njupt_safetylabpass.exceptions import LabPassError
 from .config import DEFAULT_WORKERS, LOG_FILENAME, RunSettings
 from .logging_utils import configure_logging
 from .models import RunSummary
+from .progress import PacketProgressDisplay
 from .runner import CourseRunner
 from .version import get_version
 
@@ -84,13 +85,13 @@ def _yes_no(prompt: str, input_fn: Input, output_fn: Output) -> bool:
 #     input_fn：接收提示文本并返回输入字符串的可调用对象。
 #     output_fn：输出普通提示文本的可调用对象。
 # 返回：包含 debug、课程线程数及强制重新提交开关的 RunSettings。
-# 说明：默认 debug 和强制重新提交关闭、线程数 4；非法输入继续询问。
+# 说明：默认 debug 和强制重新提交关闭、线程数 1；非法输入继续询问。
 def _settings(input_fn: Input, output_fn: Output) -> RunSettings:
     if not _yes_no("是否自定义设置？默认请选N[y/N]：", input_fn, output_fn):
         return RunSettings()
     debug = _yes_no("是否开启 debug 日志？[y/N]：", input_fn, output_fn)
     while True:
-        value = input_fn("课程并发线程数 [1–4，默认 4]：").strip()
+        value = input_fn(f"课程并发线程数 [1–4，默认 {DEFAULT_WORKERS}]：").strip()
         try:
             workers = RunSettings(workers=int(value) if value else DEFAULT_WORKERS).workers
         except ValueError:
@@ -174,7 +175,7 @@ def _authenticate(
 def _progress(event: CourseProgress) -> None:
     if event.stage == "started":
         logger.info("开始处理：%s（%s）", event.course.name, event.course.id)
-    else:
+    elif event.stage == "answered":
         logger.debug(
             "课程 %s：已提交 %d/%d 道题",
             event.course.id,
@@ -242,6 +243,7 @@ def _print_summary(summary: RunSummary) -> None:
 #     secret_input：用于隐藏输入 Token 的可调用对象，不用于密码输入。
 #     redactor：本轮共享的脱敏上下文，用于凭据登记及全部日志输出。
 # 返回：全部待处理课程成功或为空时返回 0，至少一门失败时返回 1。
+# 说明：packet_progress 是普通模式的发包计数显示；工作线程更新，收集线程清理结束课程。
 # 说明：创建唯一运行级写入协调器，默认跳过已完成课程；强制模式处理全部课程。
 # 说明：线程结束后关闭主客户端和认证结果；认证、课程列表或全局失效异常交由 run_cli 转换退出码。
 def execute(
@@ -251,6 +253,7 @@ def execute(
     input_fn: Input,
     secret_input: Input,
     redactor: Redactor,
+    packet_progress: PacketProgressDisplay | None = None,
 ) -> int:
     """在已配置日志的环境下完成认证、课程筛选及调度。"""
     started = time.perf_counter()
@@ -279,12 +282,27 @@ def execute(
         logger.info(
             "发现 %d 门课程：%d 门已完成，%d 门待处理", len(courses), finished, len(pending)
         )
-        results = CourseRunner(
-            client,
-            settings.workers,
-            progress=_progress,
-            completed=_completed,
-        ).run(pending)
+
+        def progress(event: CourseProgress) -> None:
+            _progress(event)
+            if packet_progress is not None and not settings.debug:
+                packet_progress.update(event)
+
+        def completed(result: CourseResult, count: int, total: int) -> None:
+            if packet_progress is not None:
+                packet_progress.clear(result.course.id)
+            _completed(result, count, total)
+
+        try:
+            results = CourseRunner(
+                client,
+                settings.workers,
+                progress=progress,
+                completed=completed,
+            ).run(pending)
+        finally:
+            if packet_progress is not None:
+                packet_progress.clear()
     summary = RunSummary(len(courses), skipped, tuple(results), time.perf_counter() - started)
     _print_summary(summary)
     return 1 if summary.failed else 0
@@ -314,7 +332,18 @@ def run_cli(
         current_version = get_version()
         output_fn(f"LabPass {current_version}")
         settings = _settings(input_fn, output_fn)
-        with configure_logging(settings.debug, redactor=redactor, stream=stream):
+        with (
+            (
+                PacketProgressDisplay(stream if stream is not None else sys.stdout, redactor)
+                if not settings.debug
+                else nullcontext()
+            ) as packet_progress,
+            configure_logging(
+                settings.debug,
+                redactor=redactor,
+                stream=packet_progress if packet_progress is not None else stream,
+            ),
+        ):
             try:
                 logger.debug("本次运行版本：%s；课程线程数：%d", current_version, settings.workers)
                 environment = _network(input_fn, output_fn)
@@ -324,6 +353,7 @@ def run_cli(
                     input_fn=input_fn,
                     secret_input=secret_input,
                     redactor=redactor,
+                    packet_progress=packet_progress,
                 )
             except (AuthError, LabPassError) as exc:
                 logger.error("运行终止：%s", exc)

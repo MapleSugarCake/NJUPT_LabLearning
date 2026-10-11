@@ -1,6 +1,12 @@
+import tomllib
+from pathlib import Path
+
 from PyInstaller.building.api import EXE, PYZ
 from PyInstaller.building.build_main import Analysis
 from PyInstaller.utils.hooks import copy_metadata
+
+with (Path(SPECPATH) / "pyproject.toml").open("rb") as file:
+    version = tomllib.load(file)["project"]["version"]
 
 a = Analysis(
     ["main.py"],
@@ -23,7 +29,7 @@ exe = EXE(
     a.binaries,
     a.datas,
     [],
-    name="labpass",
+    name=f"NJUPT_Labpass_v{version}",
     debug=False,
     bootloader_ignore_signals=False,
     strip=False,

@@ -25,7 +25,7 @@ def test_custom_force_setting_and_prompt_order(monkeypatch, answer, enabled):
     assert inputs.events == [
         "是否自定义设置？默认请选N[y/N]：",
         "是否开启 debug 日志？[y/N]：",
-        "课程并发线程数 [1–4，默认 4]：",
+        "课程并发线程数 [1–4，默认 1]：",
         "是否强制重新提交所有课程？[y/N]：",
         "是否强制重新提交所有课程？[y/N]：",
         "网络环境 [1 校外 VPN（默认）/ 2 校园网直连]：",
@@ -111,7 +111,7 @@ def test_course_selection_and_summary(run_cli_business, install_transport, force
     assert code == 0
     assert question_reads == selected
     assert list_reads == 1 + len(selected)
-    assert sum(request.method == "POST" for _, request, _ in calls) == 2 * len(selected)
+    assert sum(request.method == "POST" for _, request, _ in calls) == 13 * len(selected)
     assert f"发现 {len(states)} 门课程：{sum(states)} 门已完成，{len(selected)} 门待处理" in output
     assert f"跳过 {len(states) - len(selected)}，成功 {len(selected)}，失败 0" in output
     assert ("强制重新提交所有课程模式已启用" in output) is force
@@ -165,7 +165,10 @@ def test_finished_course_full_sequence_and_payload(
             )
             for i in range(question_count)
         ],
-        ("POST", "finishRate", {"id": "list-course", "watchDuration": "123"}),
+        *[
+            ("POST", "finishRate", {"id": "list-course", "watchDuration": str(value)})
+            for value in range(10, 121, 10)
+        ],
         ("POST", "finish", {"id": "list-course"}),
         ("GET", "myCourseList", None),
     ]
@@ -181,6 +184,8 @@ def test_finished_course_full_sequence_and_payload(
         "answer-0",
         "answer-1",
         "video",
+        "video_middle",
+        "video_final",
         "finish",
         "verify",
         "verify_incomplete",
@@ -226,8 +231,13 @@ def test_force_mode_preserves_failure_boundaries(
             action = "questions"
         elif endpoint == "submitAnswer":
             action = json.loads(request.body)["questionId"]
+        elif endpoint == "finishRate":
+            value = json.loads(request.body)["watchDuration"]
+            action = {"10": "video", "60": "video_middle", "120": "video_final"}.get(
+                value, f"video:{value}"
+            )
         else:
-            action = "video" if endpoint == "finishRate" else "finish"
+            action = "finish"
         events.append(action)
         if (
             failure == "expired"
@@ -282,7 +292,18 @@ def test_force_mode_preserves_failure_boundaries(
 
     calls = install_transport(handle)
     code, output = run_cli_business()
-    full = ["list", "questions", "answer-0", "answer-1", "video", "finish", "verify"]
+    full = [
+        "list",
+        "questions",
+        "answer-0",
+        "answer-1",
+        *[
+            {10: "video", 60: "video_middle", 120: "video_final"}.get(value, f"video:{value}")
+            for value in range(10, 121, 10)
+        ],
+        "finish",
+        "verify",
+    ]
     stop = {
         "duration": "list",
         "lock": "answer-0",
@@ -296,8 +317,6 @@ def test_force_mode_preserves_failure_boundaries(
         "verify_unknown": "verify",
     }.get(failure, failure)
     expected = full[: full.index(stop) + 1]
-    if failure == "verify_percent":
-        expected += ["finish", "verify"]
     assert events == expected
     assert code == (
         130
@@ -355,6 +374,6 @@ def test_force_mode_course_failure_does_not_stop_other_courses(run_cli_business,
     code, output = run_cli_business()
     assert code == 1
     assert question_reads == ["bad", "good"]
-    assert writes == ["good", "good"]
+    assert writes == ["good"] * 13
     assert "跳过 0，成功 1，失败 1" in output
     assert all(session.closed for session, _, _ in calls)

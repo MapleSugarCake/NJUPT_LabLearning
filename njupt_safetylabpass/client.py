@@ -12,7 +12,7 @@
     SafetyLabClient.list_courses：读取课程列表并规范化字段与重复记录。
     SafetyLabClient.list_questions：读取题目并保留提交标识、来源标识及答案的独立语义。
     SafetyLabClient.submit_answer：在共享写入锁内提交一条完整题目的答案。
-    SafetyLabClient.submit_video_progress：一次上报课程列表中的视频完整秒数。
+    SafetyLabClient.submit_video_progress：上报完整十秒递增序列，每个成功包后随机等待 1–6 秒。
     SafetyLabClient.verify_video_finished：回读并核验完成标记及视频百分比。
     SafetyLabClient.read_video_status：回读课程状态，保留超过 100 的实际百分比。
     SafetyLabClient.finish_course：在共享写入锁内按课程列表标识标记完成。
@@ -29,7 +29,8 @@ import logging
 import time
 from collections.abc import Callable
 from contextlib import AbstractContextManager
-from decimal import ROUND_DOWN, Decimal, InvalidOperation
+from decimal import Decimal, InvalidOperation
+from random import uniform
 from typing import Any, Self
 
 import requests
@@ -343,26 +344,46 @@ class SafetyLabClient(AbstractContextManager["SafetyLabClient"]):
                 },
             )
 
-    def submit_video_progress(self, course: Course) -> None:
-        """截取总时长的整数秒，一次上报；不将不足一秒的尾部扩为一秒。"""
+    def submit_video_progress(
+        self, course: Course, *, progress: Callable[[int, int], None] | None = None
+    ) -> None:
+        """逐包上报并回调成功包数/总包数；每包后随机等待 1–6 秒，包括末包到 finish。"""
         duration = course.require_video_duration()
-        watch_duration = format(duration.to_integral_value(rounding=ROUND_DOWN), "f")
+        watch_seconds = int(duration) // 10 * 10
+        total_packets = max(1, watch_seconds // 10)
+        watch_durations = range(10, watch_seconds + 1, 10) if watch_seconds else (0,)
         with self.mutation_coordinator.serialized():
-            logger.debug("视频时长：总秒数=%s；上报整数秒数=%s", duration, watch_duration)
-            self._request_json(
-                "POST",
-                self.api_base_url + "/jcedutec/courseSource/finishRate",
-                "提交视频进度",
-                require_result=False,
-                json={"id": course.id, "watchDuration": watch_duration},
-            )
+            if progress:
+                progress(0, total_packets)
+            for sent_packets, seconds in enumerate(watch_durations, start=1):
+                self.mutation_coordinator.check_cancelled()
+                value = str(seconds)
+                logger.debug(
+                    "视频时长：总秒数=%s；上报整十秒数=%s；序列末包秒数=%s",
+                    duration,
+                    value,
+                    watch_seconds,
+                )
+                self._request_json(
+                    "POST",
+                    self.api_base_url + "/jcedutec/courseSource/finishRate",
+                    "提交视频进度",
+                    require_result=False,
+                    json={"id": course.id, "watchDuration": value},
+                )
+                if progress:
+                    progress(sent_packets, total_packets)
+                # 每个成功包独立抽取间隔，末包及单个零秒/十秒包也执行可取消等待。
+                delay_seconds = uniform(1.0, 6.0)
+                logger.debug("视频进度提交成功；等待 %.3f 秒后继续后续写入", delay_seconds)
+                self.mutation_coordinator.wait(delay_seconds)
 
     def verify_video_finished(self, course_id: str) -> None:
         """只回读一次课程列表；不轮询状态，也不重发任何写入。"""
         self.read_video_status(course_id).require_video_finished()
 
     def read_video_status(self, course_id: str) -> Course:
-        """读取服务端真实状态，异常不能作为再次提交 finish 的依据。"""
+        """只读服务端状态；未达标或读取失败均不触发自动补交。"""
         try:
             courses = self.list_courses()
         except (AuthenticationExpiredError, RunCancelledError):

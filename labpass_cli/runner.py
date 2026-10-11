@@ -5,12 +5,13 @@
     CourseRunner：调度不同课程并等待每个课程会话完成释放。
     CourseRunner.__init__：保存主客户端、受限并发度及可选回调。
     CourseRunner._process_course：为一门课程打开独立客户端并执行顺序业务。
-    CourseRunner.run：提交课程任务，按完成顺序收集结果并保证线程池关闭。
+    CourseRunner.run：报告完成结果后补位，并保证取消清理和线程池关闭。
 """
 
 import logging
 from collections.abc import Callable
-from concurrent.futures import Future, ThreadPoolExecutor, as_completed
+from concurrent.futures import Future, ThreadPoolExecutor
+from queue import Empty, SimpleQueue
 
 from njupt_safetylabpass import Course, CourseProgress, CourseResult, SafetyLabClient, run_course
 from njupt_safetylabpass.exceptions import AuthenticationExpiredError, RunCancelledError
@@ -26,6 +27,7 @@ logger = logging.getLogger(__name__)
 # 作用：调度不同课程并等待每个课程会话完成释放。
 # 说明：并发度通过 RunSettings 校验，允许整数 1–4；单课程步骤由 run_course 执行。
 # 说明：每项任务创建和关闭独立客户端，主线程按完成顺序收集结果并调用完成回调。
+# 说明：已提交且尚未报告的任务不超过并发度，完成回调返回后才提交下一门课程。
 class CourseRunner:
     """调度不同课程并等待每个课程会话完成释放。"""
 
@@ -62,7 +64,11 @@ class CourseRunner:
         try:
             with self.client.clone() as worker:
                 return run_course(worker, course, progress=self.progress)
-        except (AuthenticationExpiredError, RunCancelledError):
+        except AuthenticationExpiredError:
+            self.client.mutation_coordinator.cancel(authentication_failed=True)
+            raise
+        except RunCancelledError:
+            self.client.mutation_coordinator.cancel()
             raise
         except Exception:
             logger.debug("课程任务启动或释放失败", exc_info=True)
@@ -72,28 +78,48 @@ class CourseRunner:
                 error="课程任务无法启动或释放；请开启 debug 查看详情",
             )
 
-    # 作用：提交课程任务，按完成顺序收集结果并保证线程池关闭。
+    # 作用：按完成通知顺序报告课程结果，然后补充任务并保证线程池关闭。
     # 参数：
     #     self：当前实例。
     #     courses：已经由调用方筛选出的待处理课程列表。
     # 返回：完成顺序排列的 CourseResult 列表；输入为空时返回空列表。
     # 说明：全局认证失效时登记相应取消状态；任何非正常结束都会取消待执行任务并阻止新的写入。
+    # 说明：首次最多提交 workers 门；副本关闭、结果收集和完成回调结束后，才补充下一门。
+    # 说明：完成通知只入队，结果回调仍由本方法的调用线程执行；短超时等待支持全局取消。
     # 说明：关闭线程池时等待已开始任务释放资源，不承诺撤回已经发送的请求。
     def run(self, courses: list[Course]) -> list[CourseResult]:
         if not courses:
             return []
         executor = ThreadPoolExecutor(max_workers=self.workers, thread_name_prefix="course")
-        futures: dict[Future[CourseResult], Course] = {}
+        futures: set[Future[CourseResult]] = set()
+        notifications: SimpleQueue[Future[CourseResult]] = SimpleQueue()
+        pending = iter(courses)
         completed_normally = False
+
+        def submit_next() -> None:
+            self.client.mutation_coordinator.check_cancelled()
+            course = next(pending, None)
+            if course is not None:
+                future = executor.submit(self._process_course, course)
+                futures.add(future)
+                future.add_done_callback(notifications.put)
+
         try:
-            for course in courses:
-                futures[executor.submit(self._process_course, course)] = course
+            for _ in range(min(self.workers, len(courses))):
+                submit_next()
             results = []
-            for future in as_completed(futures):
+            while futures:
+                try:
+                    future = notifications.get(timeout=0.1)
+                except Empty:
+                    self.client.mutation_coordinator.check_cancelled()
+                    continue
+                futures.remove(future)
                 result = future.result()
                 results.append(result)
                 if self.completed:
                     self.completed(result, len(results), len(courses))
+                submit_next()
             completed_normally = True
             return results
         except AuthenticationExpiredError:

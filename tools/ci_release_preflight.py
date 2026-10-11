@@ -58,6 +58,7 @@ def main() -> None:
             raise
     with Path(os.environ["GITHUB_OUTPUT"]).open("a", encoding="utf-8") as output:
         output.write(f"commit={commit}\n")
+        output.write(f"version={project['version']}\n")
     print(f"发布标签 {tag} 已验证：{commit}")
 
 

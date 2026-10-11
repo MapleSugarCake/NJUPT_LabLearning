@@ -3,7 +3,7 @@
 本文件定义：
     Course：表示课程列表中的一门课程及其完成状态。
     Question：保存一条课程题目关系及其提交答案。
-    CourseProgress：向调用方传递单课程开始和答题进度。
+    CourseProgress：向调用方传递单课程开始、答题和视频发包进度。
     CourseStatus：用字符串枚举表示已返回课程结果的成功或失败。
     CourseStatus.SUCCESS：课程全部处理成功的状态成员。
     CourseStatus.FAILED：课程处理失败的状态成员。
@@ -74,17 +74,19 @@ class Question:
     kind: str | None = None
 
 
-# 作用：向调用方传递单课程开始和答题进度。
-# 说明：冻结数据类关联课程、阶段及题目计数，调用方自行决定显示方式。
-# 说明：stage 为 started 或 answered；计数默认零，业务层不输出控制台文本。
+# 作用：向调用方传递单课程开始、答题和视频发包进度。
+# 说明：计数默认零，视频计数仅包含成功响应的 watchDuration 包，不代表课程完成。
+# 说明：调用方自行决定显示方式，业务层不输出控制台文本。
 @dataclass(frozen=True, slots=True)
 class CourseProgress:
-    """向调用方传递单课程开始和答题进度。"""
+    """传递课程执行进度；发包完成仍需 finish 和回读核验。"""
 
     course: Course
-    stage: Literal["started", "answered"]
+    stage: Literal["started", "answered", "video"]
     answered_count: int = 0
     question_count: int = 0
+    sent_packets: int = 0
+    total_packets: int = 0
 
 
 # 作用：用字符串枚举表示已返回课程结果的成功或失败。
