@@ -34,8 +34,8 @@ LabPass 是 Python 3.13+ 控制台工具。一个发行项目包含 `njupt_auth`
 
 - 业务包根导出 `SafetyLabClient`、`MutationCoordinator`、`run_course` 和 `Course`、`Question`、`CourseProgress`、`CourseResult`、`CourseStatus`；导入包不触发认证或课程请求。异常从 `exceptions.py` 导入。
 - CLI 的 `cli.py` 编排交互和调用；`config.py` 保存本轮设置；`runner.py` 管理课程线程池和任务资源；`models.py` 汇总结果；`logging_utils.py` 管理日志出口与脱敏格式；`version.py` 读取发行元数据。
-- 当前调用链：`entrypoint` → `run_cli` 输出版本、读取设置、建立日志上下文、选择网络 → `execute` 认证、建立客户端、读取并筛选课程 → `CourseRunner.run` → 每门课程 `client.clone()` + `run_course` → 收集结果、释放会话、打印汇总并返回退出码。
-- `CourseRunner` 按完成顺序收集结果；进度回调在课程工作线程执行，完成回调在收集结果的线程执行。回调调用方须考虑此线程归属，业务层不直接输出控制台文本。
+- 当前调用链：`entrypoint` → `run_cli` 输出版本、读取设置、建立日志上下文、选择网络 → `execute` 认证、建立客户端、读取并筛选课程 → `CourseRunner.run` → 每门课程 `client.clone()` + `run_course` → 关闭课程副本、收集结果并清理进度及输出结果 → 补充下一门课程 → 关闭主会话与工厂、打印汇总并返回退出码。
+- `CourseRunner` 首次最多提交 `workers` 门课程，已提交且尚未报告的任务不得超过该数量；按完成通知顺序收集结果，完成回调返回并检查取消状态后才补位。单线程时，上一门结果必须先于下一门启动；多线程中其他已运行课程继续执行。进度回调在课程工作线程执行，完成回调在收集结果的线程执行；Future 完成回调仅通知，不输出课程结果。回调调用方须考虑此线程归属，业务层不直接输出控制台文本。
 
 ## 认证与 Session 契约
 

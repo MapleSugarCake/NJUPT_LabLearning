@@ -7,8 +7,10 @@ import re
 from concurrent.futures import ThreadPoolExecutor
 from decimal import Decimal
 from unittest.mock import Mock
+from urllib.parse import parse_qs, urlsplit
 
 import pytest
+import requests
 from conftest import make_response, success
 from test_cli import Inputs, fake_auth_result
 
@@ -27,6 +29,93 @@ from njupt_safetylabpass import (
 class TerminalStream(io.StringIO):
     def isatty(self):
         return True
+
+
+@pytest.mark.parametrize("debug", [False, True])
+@pytest.mark.parametrize("terminal", [False, True])
+@pytest.mark.parametrize("outcome", ["success", "failure", "uncertain"])
+def test_cli_reports_result_and_clears_progress_before_next_session(
+    monkeypatch, tmp_path, install_transport, debug, terminal, outcome
+):
+    monkeypatch.chdir(tmp_path)
+    authentication = fake_auth_result()
+    monkeypatch.setattr(cli, "authenticate", Mock(return_value=authentication))
+    stream = TerminalStream() if terminal else io.StringIO()
+    result_text = f"[1/2] {'完成' if outcome == 'success' else '失败'}：synthetic-first"
+    finished = set()
+    workers = []
+    clone = SafetyLabClient.clone
+
+    def tracked_clone(client):
+        if workers:
+            assert workers[0].session.closed
+            assert result_text in stream.getvalue()
+            assert stream.getvalue().endswith("\n")
+            if debug:
+                assert result_text in (tmp_path / "labpass_log.txt").read_text(encoding="utf-8")
+        worker = clone(client)
+        workers.append(worker)
+        return worker
+
+    def handle(session, request, kwargs):
+        endpoint = urlsplit(request.url).path.rsplit("/", 1)[-1]
+        if endpoint == "myCourseList":
+            return make_response(
+                success(
+                    [
+                        {
+                            "id": value,
+                            "courseName": f"synthetic-{value}",
+                            "duration": "20.5",
+                            "isFinish": value in finished
+                            and (value != "first" or outcome == "success"),
+                            "watchDuration": "100.00"
+                            if value in finished and (value != "first" or outcome == "success")
+                            else "0.00",
+                        }
+                        for value in ("first", "second")
+                    ]
+                )
+            )
+        if request.method == "GET":
+            value = parse_qs(urlsplit(request.url).query)["id"][0]
+            if value == "second":
+                assert result_text in stream.getvalue()
+            return make_response(success([]))
+        payload = json.loads(request.body)
+        if payload["id"] == "first" and outcome == "uncertain":
+            raise requests.Timeout("synthetic submission timeout")
+        if endpoint == "finish":
+            finished.add(payload["id"])
+        return make_response(success())
+
+    monkeypatch.setattr(SafetyLabClient, "clone", tracked_clone)
+    calls = install_transport(handle)
+    settings = ["y", "y", "", "n"] if debug else ["n"]
+    assert cli.run_cli(
+        input_fn=Inputs(settings + ["", "synthetic-user", "fake-password"]),
+        output_fn=lambda _: None,
+        stream=stream,
+    ) == (0 if outcome == "success" else 1)
+    output = stream.getvalue()
+    assert output.index("开始处理：synthetic-first") < output.index(result_text)
+    assert output.index(result_text) < output.index("开始处理：synthetic-second")
+    assert output.index("开始处理：synthetic-second") < output.index("[2/2] 完成：synthetic-second")
+    if debug:
+        log = (tmp_path / "labpass_log.txt").read_text(encoding="utf-8")
+        assert f"MainThread | {result_text}" in log
+        assert log.index(result_text) < log.index("开始处理：synthetic-second")
+        assert "视频进度：" not in log and "视频进度：" not in output
+    else:
+        assert output.rindex("视频进度：synthetic-first") < output.index(result_text)
+        assert not (tmp_path / "labpass_log.txt").exists()
+    if outcome == "failure":
+        assert "视频完成状态未确认：完成标记=False，视频进度=0.00%" in output
+    if outcome == "uncertain":
+        assert "提交结果不确定" in output
+    assert len(workers) == 2 and all(worker.session.closed for worker in workers)
+    assert all(session.closed for session, _, _ in calls)
+    assert authentication.session.closed and output.endswith("\n")
 
 
 @pytest.mark.parametrize("debug", [False, True])
